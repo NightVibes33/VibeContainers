@@ -147,7 +147,8 @@ final class HomeLayoutStore {
         if pages.isEmpty { pages = [[]] }
         migrateInstalledBuiltinsIfNeeded(defaults)
         adoptNewBuiltins()
-        if fillDockFromPages() { persist() }
+        // Never auto-fill a restored Dock. Empty Dock capacity is intentional
+        // user layout state and must survive a process relaunch unchanged.
     }
 
     // MARK: - Shape
@@ -754,9 +755,10 @@ final class HomeLayoutStore {
 
         let placed = Set(allApps.compactMap(\.guestBundle))
         for bundle in installed where !placed.contains(bundle) {
+            // New guest apps land on a page. Dock membership changes only by
+            // explicit user drag/drop, exactly like SpringBoard.
             placeInFirstFreeSlot(.guest(bundle), preferring: 0, columns: columns)
         }
-        fillDockFromPages()
         persist()
     }
 

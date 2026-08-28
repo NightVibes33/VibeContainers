@@ -47,6 +47,7 @@ jobs:
             iOSSim/Model/GuestInstaller.swift
             iOSSim/Model/PackageStore.swift
             iOSSim/Apps/PackagesView.swift
+            iOSSim/Apps/GuestContainerView.swift
             iOSSim/Model/ZipArchive.swift
           )
           if git diff --quiet -- "${FILES[@]}"; then

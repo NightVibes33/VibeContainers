@@ -33,7 +33,11 @@ jobs:
           xcode-version: '26.2'
 
       - name: Apply installer fixes
-        run: python3 scripts/apply_installer_fixes.py
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/apply_installer_fixes.py
+          python3 scripts/apply_installer_followups.py
 
       - name: Persist installer fixes to main
         shell: bash

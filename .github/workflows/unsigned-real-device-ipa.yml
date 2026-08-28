@@ -39,7 +39,7 @@ jobs:
           python3 scripts/apply_installer_fixes.py
           python3 scripts/apply_installer_followups.py
           python3 scripts/apply_xcode26_fixes.py
-          python3 scripts/apply_ipad_gestures.py
+          python3 scripts/apply_ipad_gestures_v2.py
 
       - name: Persist source fixes to main
         shell: bash
@@ -67,7 +67,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "4189828+github-actions[bot]@users.noreply.github.com"
           git add -- "${FILES[@]}"
-          git commit -m "Add iPad-style multitasking gestures [skip ci]"
+          git commit -m "Add bottom-edge iPad-style multitasking gestures [skip ci]"
           git push origin HEAD:main
 
       - name: Show toolchain

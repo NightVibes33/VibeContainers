@@ -42,6 +42,7 @@ jobs:
           python3 scripts/apply_virtual_host_lock.py
           python3 scripts/apply_guest_switcher_layer_v7.py
           python3 scripts/apply_guest_bar_position_v8.py
+          python3 scripts/apply_shared_swiftui_guest_controls_v9.py
           python3 scripts/apply_home_layout_persistence.py
 
           # A restored custom layout must never be auto-packed back into Dock.
@@ -54,15 +55,22 @@ jobs:
             exit 1
           fi
 
-          # Keep the guest control in the same bottom position as the working
-          # AppWindow control. v6's raised position must not survive v8.
-          grep -Fq 'let height = max(54, window.safeAreaInsets.bottom + 36)' LiveContainer-3.8.0/MultitaskSupport/MultitaskDockView.swift
-          grep -Fq 'pill.bottomAnchor.constraint(equalTo: surface.bottomAnchor, constant: -7)' LiveContainer-3.8.0/MultitaskSupport/MultitaskDockView.swift
-          grep -Fq 'guest gesture bar restored to working bottom position' LiveContainer-3.8.0/MultitaskSupport/MultitaskDockView.swift
-          grep -Fq 'systemGestureLastTranslation' LiveContainer-3.8.0/MultitaskSupport/MultitaskDockView.swift
+          # Real guests must now use Springboard's working SwiftUI gesture model,
+          # not the old separate UIKit pan recognizer.
+          grep -Fq 'VibeContainers.SharedSpringboardGuestControl' LiveContainer-3.8.0/MultitaskSupport/MultitaskDockView.swift
+          grep -Fq 'DragGesture(minimumDistance: 12, coordinateSpace: .global)' LiveContainer-3.8.0/MultitaskSupport/MultitaskDockView.swift
+          grep -Fq 'value.startLocation.y > screenHeight - 70' LiveContainer-3.8.0/MultitaskSupport/MultitaskDockView.swift
+          grep -Fq 'elapsed >= 0.34, upwardTravel >= 28, upwardTravel < 165' LiveContainer-3.8.0/MultitaskSupport/MultitaskDockView.swift
+          grep -Fq 'upwardTravel >= 64 || predictedUpwardTravel >= 150' LiveContainer-3.8.0/MultitaskSupport/MultitaskDockView.swift
+          grep -Fq 'upwardTravel >= 12' LiveContainer-3.8.0/MultitaskSupport/MultitaskDockView.swift
+          grep -Fq '.now() + 0.230' LiveContainer-3.8.0/MultitaskSupport/MultitaskDockView.swift
+          if grep -Fq '@objc private func handleSystemGesture(_ gesture: UIPanGestureRecognizer)' LiveContainer-3.8.0/MultitaskSupport/MultitaskDockView.swift; then
+            echo "Old guest-specific UIKit pan recognizer is still present" >&2
+            exit 1
+          fi
 
-          # Guest-originated switcher presentation must demote LiveContainer's
-          # UIKit host so SwiftUI's ContainerSwitcherView can actually appear.
+          # Guest-originated switcher presentation must still clear/demote the
+          # LiveContainer host so SwiftUI's ContainerSwitcherView is visible.
           grep -Fq 'guest host demoted below SwiftUI switcher' LiveContainer-3.8.0/MultitaskSupport/MultitaskDockView.swift
           grep -Fq 'rootView.sendSubviewToBack(windowHostingView)' LiveContainer-3.8.0/MultitaskSupport/MultitaskDockView.swift
 
@@ -95,7 +103,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "4189828+github-actions[bot]@users.noreply.github.com"
           git add -- "${FILES[@]}"
-          git commit -m "Persist guest switcher fix and restore bottom bar [skip ci]"
+          git commit -m "Persist shared Springboard guest controls [skip ci]"
           git push origin HEAD:main
 
       - name: Show toolchain
@@ -173,20 +181,25 @@ jobs:
           xcrun vtool -show-build "$BIN" | tee "$RUNNER_TEMP/vtool.txt"
           grep -Eqi 'platform[[:space:]]+(IOS|2)' "$RUNNER_TEMP/vtool.txt"
 
-          # A green compile is not enough: prove the framework inside the IPA
-          # actually contains the working-position gesture and guest switcher fix.
-          strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: host bottom gesture surface installed'
-          strings "$LC_FRAMEWORK" | grep -F 'VibeContainers.SystemGestureSurface'
+          # Prove the built framework contains the shared SwiftUI guest control,
+          # not one of the previous UIKit-pan implementations.
+          strings "$LC_FRAMEWORK" | grep -F 'VibeContainers.SharedSpringboardGuestControl'
+          strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: exact Springboard SwiftUI guest control installed'
+          strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: Springboard-matched guest switcher committed after 230 ms'
+          strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: Springboard-matched guest cycle committed after 230 ms'
+          strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: guest host demoted below SwiftUI switcher'
           strings "$LC_FRAMEWORK" | grep -F 'per-window bottom grabber disabled; host owns bottom gestures'
           strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: FORCED virtual-window guest host'
           strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: rebound guest UIView'
-          strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: guest gesture bar restored to working bottom position'
-          strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: bottom gesture cancelled; using cached translation'
-          strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: guest host demoted below SwiftUI switcher'
           strings "$LC_FRAMEWORK" | grep -F 'hiding guest surfaces registered='
           strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: Dock hosting controller ready'
           strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: Home gesture committed immediately'
           strings "$BIN" | grep -F 'VibeContainers: migrating saved multitask mode'
+
+          if strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: bottom gesture cancelled; using cached translation' >/dev/null; then
+            echo "Old UIKit guest gesture classifier is still shipped" >&2
+            exit 1
+          fi
           if strings "$LC_FRAMEWORK" | grep -E 'multitaskSwipeGesture|handleMultitaskSwipeGesture|minimumNumberOfTouches = 4|maximumNumberOfTouches = 5|MagnificationGesture' >/dev/null; then
             echo "Forbidden multi-finger/pinch gesture implementation found in shipped framework" >&2
             exit 1

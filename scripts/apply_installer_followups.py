@@ -41,6 +41,18 @@ def fix_package(text: str) -> str:
     return text
 
 
+def fix_packages_view(text: str) -> str:
+    installed_update_fixed = '''                                last: pending.id == store.updates.last?.id,\n                                action: store.action(\n                                    for: pending.app,\n                                    sourceName: pending.sourceName,\n                                    sourceID: pending.sourceID\n                                )\n'''
+    if installed_update_fixed not in text:
+        text = replace_once(
+            text,
+            '''                                last: pending.id == store.updates.last?.id,\n                                action: store.action(\n                                    for: pending.app,\n                                    sourceName: pending.sourceName\n                                )\n''',
+            installed_update_fixed,
+            "Installed updates sourceID",
+        )
+    return text
+
+
 def fix_guest(text: str) -> str:
     visible_hidden_transactions = '''            includingPropertiesForKeys: [.isDirectoryKey],\n            options: []\n'''
     if visible_hidden_transactions not in text:
@@ -110,14 +122,17 @@ def fix_zip(text: str) -> str:
 
 
 package = ROOT / "iOSSim/Model/PackageStore.swift"
+packages_view = ROOT / "iOSSim/Apps/PackagesView.swift"
 guest = ROOT / "iOSSim/Model/GuestInstaller.swift"
 zip_archive = ROOT / "iOSSim/Model/ZipArchive.swift"
 
 update(package, fix_package)
+update(packages_view, fix_packages_view)
 update(guest, fix_guest)
 update(zip_archive, fix_zip)
 
 package_text = package.read_text()
+packages_view_text = packages_view.read_text()
 guest_text = guest.read_text()
 zip_text = zip_archive.read_text()
 
@@ -131,6 +146,10 @@ required = [
         "let (catalog, effectiveURL) = try await Self.fetch(url)\n            let source = Source(url: normalised, name: catalog.name)",
     ),
     (package_text, "effectiveSourceURLs[source.id] = effectiveURL"),
+    (
+        packages_view_text,
+        "last: pending.id == store.updates.last?.id,\n                                action: store.action(\n                                    for: pending.app,\n                                    sourceName: pending.sourceName,\n                                    sourceID: pending.sourceID",
+    ),
     (guest_text, "includingPropertiesForKeys: [.isDirectoryKey],\n            options: []"),
     (guest_text, "to: transactionRoot.appendingPathComponent(Self.activeTransactionMarker)"),
     (zip_text, "Int32(COMPRESSION_STREAM_FINALIZE.rawValue)"),

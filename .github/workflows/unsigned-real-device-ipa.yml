@@ -64,6 +64,13 @@ jobs:
           xcodebuild -version
           swift --version
 
+      - name: Smoke test IPA ZIP extraction
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x scripts/test_zip_archive.sh
+          scripts/test_zip_archive.sh
+
       - name: Build unsigned physical-device IPA
         shell: bash
         run: |

@@ -246,9 +246,9 @@ final class GuestInstaller {
                 at: transactionRoot,
                 withIntermediateDirectories: true
             )
-            FileManager.default.createFile(
-                atPath: transactionRoot.appendingPathComponent(Self.activeTransactionMarker).path,
-                contents: Data()
+            try Data().write(
+                to: transactionRoot.appendingPathComponent(Self.activeTransactionMarker),
+                options: .atomic
             )
             phases[bundle] = .downloading(0)
             try await download(url, to: ipaURL) { progress in
@@ -469,7 +469,7 @@ final class GuestInstaller {
         guard let children = try? manager.contentsOfDirectory(
             at: base,
             includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles]
+            options: []
         ) else { return }
 
         for child in children where child.lastPathComponent.hasPrefix(".install-") {

@@ -41,6 +41,7 @@ final class PackageStore {
         let installed: InstalledApp
         let app: AltApp
         let sourceName: String
+        let sourceID: UUID
         var id: String { installed.bundleIdentifier }
     }
 
@@ -408,10 +409,11 @@ final class PackageStore {
         }
 
         do {
-            let catalog = try await Self.fetch(url)
+            let (catalog, effectiveURL) = try await Self.fetch(url)
             let source = Source(url: normalised, name: catalog.name)
             sources.append(source)
             catalogs[source.id] = catalog
+            effectiveSourceURLs[source.id] = effectiveURL
             persistSources()
             await rebuildCatalogIndex()
             return .success(source)

@@ -33,7 +33,18 @@ jobs:
           xcode-version: '26.2'
 
       - name: Apply installer fixes
-        run: python3 scripts/apply_installer_fixes.py
+        shell: bash
+        run: |
+          set -euo pipefail
+          INSTALLER="iOSSim/Model/GuestInstaller.swift"
+          if grep -q 'URLSessionConfiguration.ephemeral' "$INSTALLER" \
+             && grep -q 'Self.resolveDownloadURL(raw, for: app)' "$INSTALLER" \
+             && grep -q 'removeArchiveAfterExtraction: false' "$INSTALLER" \
+             && grep -q 'raw.githubusercontent.com' "$INSTALLER"; then
+            echo "Installer source already contains the fixes."
+          else
+            python3 scripts/apply_installer_fixes.py
+          fi
 
       - name: Persist installer fixes to main
         shell: bash

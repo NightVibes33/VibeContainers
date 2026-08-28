@@ -31,6 +31,7 @@ final class PackageStore {
         var developer: String
         var version: String
         var sourceName: String
+        var sourceID: UUID?
         var iconURL: String?
         var installedAt: Date
 
@@ -299,7 +300,7 @@ final class PackageStore {
         }
         updates = installedList.compactMap { record in
             guard hasReadyPayload(record.bundleIdentifier),
-                  let entry = catalogIndex.entriesByBundle[record.bundleIdentifier],
+                  let entry = catalogEntry(for: record),
                   SemVer.isNewer(entry.app.latestVersion, than: record.version) else { return nil }
             return PendingUpdate(
                 installed: record,
@@ -309,6 +310,26 @@ final class PackageStore {
             )
         }
         updateBundleIdentifiers = Set(updates.map(\.installed.bundleIdentifier))
+    }
+
+    private func catalogEntry(for record: InstalledApp) -> Entry? {
+        if let sourceID = record.sourceID,
+           let entry = catalogIndex.entriesBySource[sourceID]?.first(where: {
+               $0.app.bundleIdentifier == record.bundleIdentifier
+           }) {
+            return entry
+        }
+
+        // Existing records from builds before source IDs were persisted still
+        // prefer the source name they were installed from before falling back
+        // to the first repository that publishes the same bundle identifier.
+        if let entry = catalogIndex.allApps.first(where: {
+            $0.app.bundleIdentifier == record.bundleIdentifier
+                && $0.sourceName == record.sourceName
+        }) {
+            return entry
+        }
+        return catalogIndex.entriesByBundle[record.bundleIdentifier]
     }
 
     private nonisolated static func entryNameOrder(_ lhs: Entry, _ rhs: Entry) -> Bool {
@@ -458,6 +479,7 @@ final class PackageStore {
             developer: app.developer,
             version: app.latestVersion,
             sourceName: sourceName,
+            sourceID: sourceID,
             iconURL: app.iconURL,
             installedAt: Date()
         )
@@ -521,6 +543,7 @@ final class PackageStore {
             developer: bundleIdentifier,
             version: version,
             sourceName: sourceName,
+            sourceID: nil,
             iconURL: iconURL,
             installedAt: Date()
         )

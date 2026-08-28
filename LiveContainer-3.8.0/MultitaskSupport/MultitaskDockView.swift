@@ -127,7 +127,7 @@ class AppInfoProvider {
 
 // MARK: - MultitaskDockView Manager
 @available(iOS 16.0, *)
-@objc public class MultitaskDockManager: NSObject, ObservableObject {
+@objc public class MultitaskDockManager: NSObject, ObservableObject, UIGestureRecognizerDelegate {
     @objc public static let shared = MultitaskDockManager()
     
     @Published var apps: [DockAppModel] = []
@@ -162,6 +162,10 @@ class AppInfoProvider {
     /// Tracks whether a guest owns the screen so every later UIKit hierarchy
     /// raise can restore the app-target gesture host above the guest surface.
     private var isSystemGestureSurfaceVisible = false
+    /// One recognizer per connected window. Attaching at UIWindow level makes
+    /// the bottom controls independent of SwiftUI overlays and works for both
+    /// virtual guest views and native guest UIWindowScenes.
+    private var guestBottomPans: [ObjectIdentifier: UIPanGestureRecognizer] = [:]
     /// Full-width host-owned bottom edge. Unlike a recognizer attached
     /// to a guest window, this remains reachable for maximized and
     /// windowed virtual guests and cannot be swallowed by the remote scene.
@@ -424,6 +428,7 @@ class AppInfoProvider {
             dockSuperview.bringSubviewToFront(dockView)
         }
         if isSystemGestureSurfaceVisible {
+            installGuestBottomPans()
             publishSystemGestureSurfaceVisibility(true)
         }
     }
@@ -686,7 +691,62 @@ class AppInfoProvider {
     private func setSystemGestureSurfaceVisible(_ visible: Bool) {
         dispatchPrecondition(condition: .onQueue(.main))
         isSystemGestureSurfaceVisible = visible
+        if visible { installGuestBottomPans() }
         publishSystemGestureSurfaceVisibility(visible)
+    }
+
+    private func installGuestBottomPans() {
+        let windows = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+            .filter { !$0.isHidden && $0.rootViewController != nil }
+
+        for window in windows {
+            let key = ObjectIdentifier(window)
+            guard guestBottomPans[key] == nil else { continue }
+            let pan = UIPanGestureRecognizer(target: self, action: #selector(handleGuestBottomPan(_:)))
+            pan.delegate = self
+            pan.maximumNumberOfTouches = 1
+            pan.cancelsTouchesInView = false
+            window.addGestureRecognizer(pan)
+            guestBottomPans[key] = pan
+        }
+    }
+
+    public func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard isSystemGestureSurfaceVisible,
+              let pan = gestureRecognizer as? UIPanGestureRecognizer,
+              guestBottomPans.values.contains(where: { $0 === pan }),
+              let view = pan.view else { return false }
+        let start = pan.location(in: view)
+        guard start.y >= view.bounds.height - 70 else { return false }
+        let velocity = pan.velocity(in: view)
+        return abs(velocity.x) > 20 || velocity.y < -20
+    }
+
+    public func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        guestBottomPans.values.contains { $0 === gestureRecognizer || $0 === otherGestureRecognizer }
+    }
+
+    @objc private func handleGuestBottomPan(_ pan: UIPanGestureRecognizer) {
+        guard isSystemGestureSurfaceVisible, pan.state == .ended, let view = pan.view else { return }
+        let translation = pan.translation(in: view)
+        let velocity = pan.velocity(in: view)
+        let horizontal = abs(translation.x)
+        let upward = max(0, -translation.y)
+
+        if horizontal > max(48, upward * 1.15) {
+            cycleAppLikeSpringboard(direction: translation.x < 0 ? 1 : -1)
+        } else if !apps.isEmpty, upward >= 28, upward < 165, abs(velocity.y) < 900 {
+            presentAppSwitcherLikeSpringboard()
+        } else if upward >= 64 || velocity.y <= -900 {
+            returnToHostHome()
+        } else if upward >= 12 {
+            showDockForSystemGesture()
+        }
     }
 
     /// Queue after the current hierarchy transaction. This is deliberately

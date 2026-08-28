@@ -69,6 +69,9 @@ jobs:
           grep -Fq 'controller.view.isUserInteractionEnabled = false' iOSSim/Model/RunningContainerStore.swift
           grep -Fq 'if isSystemGestureSurfaceVisible {' LiveContainer-3.8.0/MultitaskSupport/MultitaskDockView.swift
           grep -Fq 'publishSystemGestureSurfaceVisibility(true)' LiveContainer-3.8.0/MultitaskSupport/MultitaskDockView.swift
+          grep -Fq 'window.addGestureRecognizer(pan)' LiveContainer-3.8.0/MultitaskSupport/MultitaskDockView.swift
+          grep -Fq '@objc private func handleGuestBottomPan' LiveContainer-3.8.0/MultitaskSupport/MultitaskDockView.swift
+          grep -Fq 'container.isUserInteractionEnabled = false' iOSSim/Model/RunningContainerStore.swift
 
           # LiveContainer owns guest lifecycle only. It must not draw/classify a
           # second bar; it merely tells the app-target control when to appear.

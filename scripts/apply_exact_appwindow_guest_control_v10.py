@@ -564,7 +564,9 @@ private final class GuestSpringboardControlHost {
         container.frame = bounds
         container.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         container.isHidden = false
-        container.isUserInteractionEnabled = true
+        // LiveContainer owns input at UIWindow level. This host is visual only,
+        // so it can never intercept an opened app's bottom-edge touches.
+        container.isUserInteractionEnabled = false
         container.canOpenSwitcher = canOpenSwitcher
         container.onHome = onHome
         container.onSwitcher = onSwitcher

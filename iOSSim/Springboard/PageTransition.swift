@@ -70,7 +70,7 @@ struct PageTransitionModifier: ViewModifier {
 
             case .barrelRoll:
                 content
-                    .scaleEffect(1 - effectDistance * 0.32)
+                    .scaleEffect(CGFloat(1) - effectDistance * 0.32)
                     .rotationEffect(.degrees(Double(effectOffset) * 360))
                     .offset(x: effectOffset * width)
 
@@ -87,26 +87,26 @@ struct PageTransitionModifier: ViewModifier {
 
             case .carousel:
                 content
-                    .scaleEffect(1 - effectDistance * 0.28)
+                    .scaleEffect(CGFloat(1) - effectDistance * 0.28)
                     .rotation3DEffect(
                         .degrees(Double(-effectOffset) * 42),
                         axis: (x: 0, y: 1, z: 0),
                         perspective: 0.6
                     )
                     .offset(x: effectOffset * width * 0.88)
-                    .opacity(1 - effectDistance * 0.55)
+                    .opacity(CGFloat(1) - effectDistance * 0.55)
 
             case .fade:
                 content
-                    .scaleEffect(1 - effectDistance * 0.12)
-                    .opacity(1 - effectDistance)
+                    .scaleEffect(CGFloat(1) - effectDistance * 0.12)
+                    .opacity(CGFloat(1) - effectDistance)
             }
         }
         // Keep modifier topology stable if Reduce Motion changes while a page
         // is alive. Its reduced presentation is a cross-fade with just enough
         // translation to remain connected to the finger.
         .offset(x: reducesMotion ? offset * width * 0.06 : 0)
-        .opacity(reducesMotion ? max(0, 1 - distance) : 1)
+        .opacity(reducesMotion ? max(CGFloat(0), CGFloat(1) - distance) : CGFloat(1))
     }
 }
 

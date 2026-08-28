@@ -98,12 +98,12 @@ struct SpringboardView: View {
         GeometryReader { geo in
             let screen = geo.size
             let dismissalRetreat = motionDisabled ? 0 : interactiveDismissal
-            let homeTransitionProgress = openProgress * (1 - dismissalRetreat * 0.16)
+            let homeTransitionProgress = openProgress * (CGFloat(1) - dismissalRetreat * 0.16)
 
             ZStack {
                 Wallpaper(size: screen)
-                    .scaleEffect(motionDisabled ? 1 : 1 + homeTransitionProgress * 0.045)
-                    .opacity(1 - homeTransitionProgress * 0.18)
+                    .scaleEffect(motionDisabled ? CGFloat(1) : CGFloat(1) + homeTransitionProgress * 0.045)
+                    .opacity(CGFloat(1) - homeTransitionProgress * 0.18)
 
                 home(screen: screen)
                     // Spotlight opens on a downward swipe, so the gesture is
@@ -111,10 +111,10 @@ struct SpringboardView: View {
                     // this only claims a drag that is clearly vertical.
                     .simultaneousGesture(searchGesture)
                     .simultaneousGesture(appSwitcherGesture(screenHeight: screen.height))
-                    .scaleEffect(motionDisabled ? 1 : 1 + homeTransitionProgress * 0.05)
+                    .scaleEffect(motionDisabled ? CGFloat(1) : CGFloat(1) + homeTransitionProgress * 0.05)
                     // Rides the cross-fade rather than the spring: the icons
                     // used to still be showing through the app's first frames.
-                    .opacity(openRevealed ? dismissalRetreat * 0.72 : 1)
+                    .opacity(openRevealed ? dismissalRetreat * 0.72 : CGFloat(1))
                     .allowsHitTesting(
                         openApp == nil && menuApp == nil && !runningContainers.isSwitcherPresented
                     )

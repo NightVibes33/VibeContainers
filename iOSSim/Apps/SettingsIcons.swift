@@ -357,14 +357,14 @@ struct Star: Shape {
         let center = CGPoint(x: rect.midX, y: rect.midY)
         let outer = min(rect.width, rect.height) / 2
         let inner = outer * 0.45
-        let step = Double.pi / Double(points)
+        let step = CGFloat.pi / CGFloat(points)
 
         var path = Path()
         for index in 0..<(points * 2) {
             let radius = index.isMultiple(of: 2) ? outer : inner
-            let angle = Double(index) * step - .pi / 2
-            let point = CGPoint(x: center.x + cos(angle) * radius,
-                                y: center.y + sin(angle) * radius)
+            let angle = CGFloat(index) * step - .pi / 2
+            let point = CGPoint(x: center.x + CoreGraphics.cos(angle) * radius,
+                                y: center.y + CoreGraphics.sin(angle) * radius)
             if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
         }
         path.closeSubpath()

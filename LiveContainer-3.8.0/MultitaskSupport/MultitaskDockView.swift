@@ -159,6 +159,14 @@ class AppInfoProvider {
     /// Set only while the bottom gesture explicitly exposes the existing
     /// multitasking dock on a phone. Normal launches stay edge-to-edge.
     private var gestureDockOverride = false
+    /// Full-width host-owned bottom edge. Unlike a recognizer attached
+    /// to a guest window, this remains reachable for maximized and
+    /// windowed virtual guests and cannot be swallowed by the remote scene.
+    private var systemGestureSurface: UIView?
+    private var systemGesturePill: UIView?
+    private var systemGestureRecognizer: UIPanGestureRecognizer?
+    private var systemGestureBeganAt: TimeInterval = 0
+    private var systemGestureTriggered = false
 
     public struct Constants {
         // MARK: - Layout & Sizing
@@ -406,6 +414,14 @@ class AppInfoProvider {
         }
         rootView.bringSubviewToFront(windowHostingView)
 
+        // The bottom edge is a host/system affordance, so it must sit above
+        // every remote guest surface. The floating dock, when explicitly
+        // summoned, remains above the gesture strip so its controls still work.
+        installSystemGestureSurface()
+        if let gestureSurface = systemGestureSurface,
+           gestureSurface.superview === rootView {
+            rootView.bringSubviewToFront(gestureSurface)
+        }
         if let dockView = hostingController?.view,
            let dockSuperview = dockView.superview {
             dockSuperview.bringSubviewToFront(dockView)
@@ -583,6 +599,7 @@ class AppInfoProvider {
             guard self.isDockEnabled() else { return }
             
             if self.apps.isEmpty {
+                self.setSystemGestureSurfaceVisible(false)
                 self.hideDock()
             } else if self.isVisible {
                 self.updateDockFrame()
@@ -628,7 +645,10 @@ class AppInfoProvider {
                 appUUID,
                 focused ? "yes" : "no"
             )
-            if focused { return 0 }
+            if focused {
+                setSystemGestureSurfaceVisible(true)
+                return 0
+            }
             if apps.contains(where: { $0.appUUID == appUUID }) {
                 return Int32(EAGAIN)
             }
@@ -650,11 +670,183 @@ class AppInfoProvider {
         return false
     }
 
+    // MARK: - Host-owned iPad-style system gesture surface
+
+    private func installSystemGestureSurface() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard let window = keyWindow,
+              let rootView = window.rootViewController?.view else { return }
+
+        let height = max(54, window.safeAreaInsets.bottom + 36)
+        let frame = CGRect(
+            x: 0,
+            y: max(0, rootView.bounds.height - height),
+            width: rootView.bounds.width,
+            height: height
+        )
+
+        if let surface = systemGestureSurface {
+            if surface.superview !== rootView {
+                surface.removeFromSuperview()
+                rootView.addSubview(surface)
+            }
+            surface.frame = frame
+            rootView.bringSubviewToFront(surface)
+            return
+        }
+
+        let surface = UIView(frame: frame)
+        surface.autoresizingMask = [.flexibleWidth, .flexibleTopMargin]
+        surface.backgroundColor = .clear
+        surface.isUserInteractionEnabled = true
+        surface.isMultipleTouchEnabled = false
+        surface.isHidden = true
+        surface.accessibilityIdentifier = "VibeContainers.SystemGestureSurface"
+        surface.accessibilityLabel = "VibeContainers system gestures"
+        surface.accessibilityHint = "Swipe up for Home, pull slightly for Dock, pause for the app switcher, or swipe sideways to change apps."
+
+        let pill = UIView(frame: .zero)
+        pill.translatesAutoresizingMaskIntoConstraints = false
+        pill.isUserInteractionEnabled = false
+        pill.backgroundColor = UIColor.label.withAlphaComponent(0.82)
+        pill.layer.cornerRadius = 2.5
+        pill.layer.shadowColor = UIColor.systemBackground.cgColor
+        pill.layer.shadowOpacity = 0.65
+        pill.layer.shadowRadius = 1.5
+        pill.layer.shadowOffset = .zero
+        surface.addSubview(pill)
+        NSLayoutConstraint.activate([
+            pill.centerXAnchor.constraint(equalTo: surface.centerXAnchor),
+            pill.bottomAnchor.constraint(equalTo: surface.bottomAnchor, constant: -7),
+            pill.widthAnchor.constraint(equalToConstant: 122),
+            pill.heightAnchor.constraint(equalToConstant: 5),
+        ])
+
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(handleSystemGesture(_:)))
+        pan.minimumNumberOfTouches = 1
+        pan.maximumNumberOfTouches = 1
+        pan.cancelsTouchesInView = true
+        pan.delaysTouchesBegan = false
+        pan.delaysTouchesEnded = false
+        surface.addGestureRecognizer(pan)
+
+        rootView.addSubview(surface)
+        rootView.bringSubviewToFront(surface)
+        systemGestureSurface = surface
+        systemGesturePill = pill
+        systemGestureRecognizer = pan
+        NSLog("VibeContainers: host bottom gesture surface installed")
+    }
+
+    private func setSystemGestureSurfaceVisible(_ visible: Bool) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        installSystemGestureSurface()
+        systemGestureSurface?.isHidden = !visible
+        if visible,
+           let surface = systemGestureSurface,
+           let rootView = surface.superview {
+            rootView.bringSubviewToFront(surface)
+            if let dockView = hostingController?.view,
+               dockView.superview === rootView {
+                rootView.bringSubviewToFront(dockView)
+            }
+        }
+    }
+
+    private func currentSystemGestureAppUUID() -> String? {
+        // Prefer the actual visible virtual surface. Falling back to the last
+        // registry entry keeps horizontal switching deterministic for a native
+        // scene whose UIView is not hosted in windowHostingView.
+        for app in apps.reversed() {
+            if let view = app.view,
+               view.window != nil,
+               !view.isHidden,
+               view.alpha > 0.01 {
+                return app.appUUID
+            }
+        }
+        return apps.last?.appUUID
+    }
+
+    @objc private func handleSystemGesture(_ gesture: UIPanGestureRecognizer) {
+        guard !apps.isEmpty else { return }
+
+        switch gesture.state {
+        case .began:
+            systemGestureTriggered = false
+            systemGestureBeganAt = ProcessInfo.processInfo.systemUptime
+            return
+        case .cancelled, .failed:
+            systemGestureTriggered = false
+            systemGestureBeganAt = 0
+            return
+        case .changed, .ended:
+            break
+        default:
+            return
+        }
+
+        guard !systemGestureTriggered else { return }
+        let translation = gesture.translation(in: gesture.view)
+        let velocity = gesture.velocity(in: gesture.view)
+        let horizontal = abs(translation.x)
+        let upward = max(0, -translation.y)
+        let elapsed = max(0, ProcessInfo.processInfo.systemUptime - systemGestureBeganAt)
+
+        // iPad-style home-indicator scrub: directly focus the adjacent running
+        // container through the existing focus path.
+        if horizontal >= 46, horizontal > abs(translation.y) * 1.20 {
+            systemGestureTriggered = true
+            let direction = translation.x < 0 ? 1 : -1
+            let feedback = UIImpactFeedbackGenerator(style: .light)
+            feedback.impactOccurred()
+            _ = cycleApp(from: currentSystemGestureAppUUID(), direction: direction)
+            return
+        }
+
+        if gesture.state == .changed {
+            // Lift and pause: use VibeContainers' existing captured-preview
+            // app switcher. Keep the threshold forgiving enough to feel like
+            // iPadOS rather than requiring a precisely measured drag.
+            if elapsed >= 0.38, upward >= 30, upward < 170,
+               upward > horizontal * 1.10, abs(velocity.y) < 950 {
+                systemGestureTriggered = true
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                presentAppSwitcher()
+                return
+            }
+
+            // A decisive upward flick returns to Vibe Home immediately while
+            // retaining every guest process for later focus/resume.
+            if elapsed < 0.32, upward >= 78, upward > horizontal * 1.05,
+               velocity.y < -550 {
+                systemGestureTriggered = true
+                returnToHostHome()
+                return
+            }
+            return
+        }
+
+        let predictedUpward = max(upward, upward + max(0, -velocity.y) * 0.08)
+        systemGestureTriggered = true
+        systemGestureBeganAt = 0
+        if elapsed >= 0.34, upward >= 28, upward < 170 {
+            presentAppSwitcher()
+        } else if upward >= 58 || predictedUpward >= 135 {
+            returnToHostHome()
+        } else if upward >= 10 {
+            showDockForSystemGesture()
+        } else {
+            systemGestureTriggered = false
+        }
+    }
+
     // MARK: - Vibe iPad-style bottom gestures
 
     /// Reveal VibeContainers' Springboard without terminating guest processes.
     @objc public func returnToHostHome() {
         let action = {
+            self.setSystemGestureSurfaceVisible(false)
             _ = self.captureAppSwitcherPreviews()
             _ = self.captureAppSwitcherPreviewViews()
             self.gestureDockOverride = false
@@ -668,6 +860,7 @@ class AppInfoProvider {
     /// A short upward pull uses LiveContainer's existing multitasking dock.
     @objc public func showDockForSystemGesture() {
         let action = {
+            self.setSystemGestureSurfaceVisible(true)
             guard !self.apps.isEmpty else { return }
             self.gestureDockOverride = true
             self.raiseHostedSurfaces()
@@ -705,7 +898,9 @@ class AppInfoProvider {
 
         gestureDockOverride = false
         hideDock()
-        return focusAppResult(apps[targetIndex].appUUID) == 0
+        let focused = focusAppResult(apps[targetIndex].appUUID) == 0
+        if focused { setSystemGestureSurfaceVisible(true) }
+        return focused
     }
 
     /// Reveals VibeContainers' adaptive app switcher after clearing the guest
@@ -723,6 +918,7 @@ class AppInfoProvider {
 
     private func presentAppSwitcher(animated: Bool) {
         let present = {
+            self.setSystemGestureSurfaceVisible(false)
             let startedAt = ProcessInfo.processInfo.systemUptime
             let previews = self.captureAppSwitcherPreviews()
             let previewViews = self.captureAppSwitcherPreviewViews()
@@ -948,6 +1144,7 @@ class AppInfoProvider {
             && !targetView.isHidden
             && targetView.alpha > 0.99
             && targetView.window != nil
+        if focused { setSystemGestureSurfaceVisible(true) }
         NSLog(
             "VibeContainers: virtual focus %@ %@ (surface=%@ top=%@ hostWindow=%@)",
             uuid,
@@ -1262,13 +1459,13 @@ class AppInfoProvider {
                 ]
             )
 
-            // Keep native scenes in the lifecycle registry without displaying
-            // LiveContainer's floating virtual-window dock for them.
+            self.setSystemGestureSurfaceVisible(true)
+
+            // Keep the existing multitasking dock as the Dock action, but do
+            // not leave LiveContainer's old floating rail permanently visible.
+            // A short bottom pull summons it; Home/switcher hide it again.
             guard self.isDockEnabled() else { return }
-            
-            if self.apps.count == 1 {
-                self.showDock()
-            } else if self.isVisible {
+            if self.isVisible {
                 self.updateDockFrame()
             }
         }

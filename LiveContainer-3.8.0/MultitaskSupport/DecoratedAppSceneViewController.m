@@ -301,7 +301,9 @@
     self.appSwitcherGesture.delaysTouchesEnded = NO;
     self.appSwitcherGesture.delegate = self;
     [self.appSwitcherGrabber addGestureRecognizer:self.appSwitcherGesture];
-    NSLog(@"VibeContainers: installed iPad-style bottom gestures above the guest scene");
+    self.appSwitcherGrabber.hidden = YES;
+    self.appSwitcherGrabber.userInteractionEnabled = NO;
+    NSLog(@"VibeContainers: per-window bottom grabber disabled; host owns bottom gestures");
 }
 
 - (BOOL)canHandleAppSwitcherGesture:(UIPanGestureRecognizer *)gesture {

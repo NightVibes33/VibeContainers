@@ -1089,7 +1089,7 @@ final class GuestInstaller {
             return LaunchOutcome(
                 ok: true,
                 headline: "Guest opened",
-                detail: "Running in its own app process. Use the floating dock to switch, resize, minimize or close it."
+                detail: "Running in its own app process. Use the bottom edge for Dock, Home, the app switcher, or app-to-app switching."
             )
         }
 

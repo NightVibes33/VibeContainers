@@ -42,6 +42,7 @@ jobs:
           python3 scripts/apply_ipad_gestures_v2.py
           python3 scripts/apply_ipad_gestures_v3.py
           python3 scripts/apply_virtual_host_lock.py
+          python3 scripts/apply_ipad_gestures_v4.py
 
       - name: Persist source fixes to main
         shell: bash
@@ -71,7 +72,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "4189828+github-actions[bot]@users.noreply.github.com"
           git add -- "${FILES[@]}"
-          git commit -m "Force Vibe guest launches through host gesture surface [skip ci]"
+          git commit -m "Harden Vibe bottom gesture action delivery [skip ci]"
           git push origin HEAD:main
 
       - name: Show toolchain
@@ -155,6 +156,10 @@ jobs:
           strings "$LC_FRAMEWORK" | grep -F 'VibeContainers.SystemGestureSurface'
           strings "$LC_FRAMEWORK" | grep -F 'per-window bottom grabber disabled; host owns bottom gestures'
           strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: FORCED virtual-window guest host'
+          strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: rebound guest UIView'
+          strings "$LC_FRAMEWORK" | grep -F 'bottom gesture cancelled by UIKit; committing last translation'
+          strings "$LC_FRAMEWORK" | grep -F 'hiding guest surfaces registered='
+          strings "$LC_FRAMEWORK" | grep -F 'Dock action could not create hosting controller'
           strings "$BIN" | grep -F 'VibeContainers: migrating saved multitask mode'
           if strings "$LC_FRAMEWORK" | grep -E 'multitaskSwipeGesture|handleMultitaskSwipeGesture|minimumNumberOfTouches = 4|maximumNumberOfTouches = 5|MagnificationGesture' >/dev/null; then
             echo "Forbidden multi-finger/pinch gesture implementation found in shipped framework" >&2

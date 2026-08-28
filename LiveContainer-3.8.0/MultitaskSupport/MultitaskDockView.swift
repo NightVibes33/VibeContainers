@@ -167,6 +167,8 @@ class AppInfoProvider {
     private var systemGestureRecognizer: UIPanGestureRecognizer?
     private var systemGestureBeganAt: TimeInterval = 0
     private var systemGestureTriggered = false
+    private var systemGestureLastTranslation: CGPoint = .zero
+    private var systemGestureLastVelocity: CGPoint = .zero
 
     public struct Constants {
         // MARK: - Layout & Sizing
@@ -688,12 +690,21 @@ class AppInfoProvider {
         guard let window = keyWindow,
               let rootView = window.rootViewController?.view else { return }
 
-        let height = max(54, window.safeAreaInsets.bottom + 36)
+        let systemBottomInset = max(window.safeAreaInsets.bottom, rootView.safeAreaInsets.bottom)
+        let controlHeight: CGFloat = 52
+        let gapAboveSystemZone: CGFloat = 6
+        let controlBottom = max(0, rootView.bounds.height - systemBottomInset - gapAboveSystemZone)
         let frame = CGRect(
             x: 0,
-            y: max(0, rootView.bounds.height - height),
+            y: max(0, controlBottom - controlHeight),
             width: rootView.bounds.width,
-            height: height
+            height: controlHeight
+        )
+        NSLog(
+            "VibeContainers: app-owned bottom gesture strip y=%.1f h=%.1f systemInset=%.1f",
+            frame.origin.y,
+            frame.height,
+            systemBottomInset
         )
 
         if let surface = systemGestureSurface {
@@ -728,7 +739,7 @@ class AppInfoProvider {
         surface.addSubview(pill)
         NSLayoutConstraint.activate([
             pill.centerXAnchor.constraint(equalTo: surface.centerXAnchor),
-            pill.bottomAnchor.constraint(equalTo: surface.bottomAnchor, constant: -7),
+            pill.bottomAnchor.constraint(equalTo: surface.bottomAnchor, constant: -4),
             pill.widthAnchor.constraint(equalToConstant: 122),
             pill.heightAnchor.constraint(equalToConstant: 5),
         ])
@@ -782,27 +793,45 @@ class AppInfoProvider {
     @objc private func handleSystemGesture(_ gesture: UIPanGestureRecognizer) {
         guard !apps.isEmpty else { return }
 
+        let translation: CGPoint
+        let velocity: CGPoint
         switch gesture.state {
         case .began:
             systemGestureTriggered = false
             systemGestureBeganAt = ProcessInfo.processInfo.systemUptime
+            systemGestureLastTranslation = .zero
+            systemGestureLastVelocity = .zero
             return
+        case .changed:
+            translation = gesture.translation(in: gesture.view)
+            velocity = gesture.velocity(in: gesture.view)
+            systemGestureLastTranslation = translation
+            systemGestureLastVelocity = velocity
+        case .ended:
+            translation = gesture.translation(in: gesture.view)
+            velocity = gesture.velocity(in: gesture.view)
+            systemGestureLastTranslation = translation
+            systemGestureLastVelocity = velocity
         case .cancelled:
-            NSLog("VibeContainers: bottom gesture cancelled by UIKit; committing last translation")
-            break
+            translation = systemGestureLastTranslation
+            velocity = systemGestureLastVelocity
+            NSLog(
+                "VibeContainers: bottom gesture cancelled; using cached translation x=%.1f y=%.1f velocityY=%.1f",
+                translation.x,
+                translation.y,
+                velocity.y
+            )
         case .failed:
             systemGestureTriggered = false
             systemGestureBeganAt = 0
+            systemGestureLastTranslation = .zero
+            systemGestureLastVelocity = .zero
             return
-        case .changed, .ended:
-            break
         default:
             return
         }
 
         guard !systemGestureTriggered else { return }
-        let translation = gesture.translation(in: gesture.view)
-        let velocity = gesture.velocity(in: gesture.view)
         let horizontal = abs(translation.x)
         let upward = max(0, -translation.y)
         let elapsed = max(0, ProcessInfo.processInfo.systemUptime - systemGestureBeganAt)

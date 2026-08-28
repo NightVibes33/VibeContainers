@@ -233,7 +233,7 @@ struct AppWindow: View {
     }
 
     private func openContainerSwitcher() {
-        interactiveDismissal = 0
+        dismissalProgress = 0
         onClose()
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(230))
@@ -246,7 +246,7 @@ struct AppWindow: View {
             settleDismissal()
             return
         }
-        interactiveDismissal = 0
+        dismissalProgress = 0
         onClose()
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(230))

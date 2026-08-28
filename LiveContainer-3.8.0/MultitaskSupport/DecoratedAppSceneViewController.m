@@ -25,6 +25,7 @@
 @property(nonatomic) UIButton *appSwitcherGrabber;
 @property(nonatomic) UIPanGestureRecognizer *appSwitcherGesture;
 @property(nonatomic) BOOL appSwitcherGestureTriggered;
+@property(nonatomic) NSTimeInterval appSwitcherGestureBeganAt;
 @property(nonatomic, readonly) BOOL usesPhoneFullscreenPresentation;
 - (NSArray<UIMenuElement *> *)buildTitleMenuChildren;
 @end
@@ -257,8 +258,8 @@
     self.appSwitcherGrabber = [UIButton buttonWithType:UIButtonTypeCustom];
     self.appSwitcherGrabber.translatesAutoresizingMaskIntoConstraints = NO;
     self.appSwitcherGrabber.backgroundColor = UIColor.clearColor;
-    self.appSwitcherGrabber.accessibilityLabel = @"Open VibeContainers app switcher";
-    self.appSwitcherGrabber.accessibilityHint = @"Tap or swipe up to switch containers.";
+    self.appSwitcherGrabber.accessibilityLabel = @"VibeContainers multitasking gestures";
+    self.appSwitcherGrabber.accessibilityHint = @"Short swipe for Dock, swipe up for Home, hold for the app switcher, or swipe sideways to change apps.";
     self.appSwitcherGrabber.accessibilityTraits = UIAccessibilityTraitButton;
     self.appSwitcherGrabber.accessibilityIdentifier = @"VibeContainers.BottomSwitcherGrabber";
     [self.appSwitcherGrabber addTarget:self
@@ -300,11 +301,11 @@
     self.appSwitcherGesture.delaysTouchesEnded = NO;
     self.appSwitcherGesture.delegate = self;
     [self.appSwitcherGrabber addGestureRecognizer:self.appSwitcherGesture];
-    NSLog(@"VibeContainers: installed virtual bottom switcher grabber above the guest scene");
+    NSLog(@"VibeContainers: installed iPad-style bottom gestures above the guest scene");
 }
 
 - (BOOL)canHandleAppSwitcherGesture:(UIPanGestureRecognizer *)gesture {
-    if (!self.usesPhoneFullscreenPresentation || !self.isMaximized ||
+    if (!self.isMaximized ||
         self.view.hidden || self.view.alpha < 0.01 || !self.view.window) {
         return NO;
     }
@@ -313,22 +314,17 @@
 }
 
 - (void)handleAppSwitcherGrabberTap {
-    if (!self.usesPhoneFullscreenPresentation || !self.isMaximized ||
-        self.view.hidden || self.view.alpha < 0.01 || !self.view.window) {
-        NSLog(@"VibeContainers: ignored inactive virtual bottom grabber tap");
-        return;
-    }
-
+    if (!self.isMaximized || self.view.hidden || self.view.alpha < 0.01 || !self.view.window) return;
     UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc]
         initWithStyle:UIImpactFeedbackStyleLight];
     [feedback impactOccurred];
-    NSLog(@"VibeContainers: virtual bottom grabber tap requested the app switcher");
-    [[MultitaskDockManager shared] presentAppSwitcher];
+    [[MultitaskDockManager shared] showDockForSystemGesture];
 }
 
 - (void)handleAppSwitcherGesture:(UIPanGestureRecognizer *)gesture {
     if (gesture.state == UIGestureRecognizerStateBegan) {
         self.appSwitcherGestureTriggered = NO;
+        self.appSwitcherGestureBeganAt = NSDate.date.timeIntervalSinceReferenceDate;
         return;
     }
     if (gesture.state == UIGestureRecognizerStateCancelled ||
@@ -338,37 +334,65 @@
     }
     if (gesture.state != UIGestureRecognizerStateChanged &&
         gesture.state != UIGestureRecognizerStateEnded) return;
+    if (self.appSwitcherGestureTriggered || ![self canHandleAppSwitcherGesture:gesture]) return;
 
-    if (!self.appSwitcherGestureTriggered && [self canHandleAppSwitcherGesture:gesture]) {
-        CGPoint translation = [gesture translationInView:self.view.window];
-        CGPoint velocity = [gesture velocityInView:self.view.window];
-        CGFloat projectedVertical = translation.y + MIN(velocity.y, 0.0) * 0.06;
-        CGFloat upwardTranslation = -translation.y;
-        CGFloat upwardTravel = MAX(upwardTranslation, -projectedVertical);
-        // Commit while the drag is still in flight. Waiting for a long travel
-        // or for .ended lets the real iOS home gesture cancel our recognizer.
-        if (upwardTranslation > 6.0 && upwardTravel > 22.0 &&
-            upwardTranslation > fabs(translation.x) * 0.60) {
-            self.appSwitcherGestureTriggered = YES;
-            UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc]
-                initWithStyle:UIImpactFeedbackStyleLight];
-            [feedback impactOccurred];
-            NSLog(@"VibeContainers: virtual bottom swipe requested the app switcher");
-            [[MultitaskDockManager shared] presentAppSwitcher];
-        }
+    CGPoint translation = [gesture translationInView:self.view.window];
+    CGPoint velocity = [gesture velocityInView:self.view.window];
+    CGFloat horizontal = fabs(translation.x);
+    CGFloat upward = MAX(0.0, -translation.y);
+    NSTimeInterval elapsed = MAX(0.0, NSDate.date.timeIntervalSinceReferenceDate - self.appSwitcherGestureBeganAt);
+
+    // Slide across the home indicator to move directly between running apps.
+    if (horizontal > 44.0 && horizontal > fabs(translation.y) * 1.25) {
+        self.appSwitcherGestureTriggered = YES;
+        NSInteger direction = translation.x < 0 ? 1 : -1;
+        UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc]
+            initWithStyle:UIImpactFeedbackStyleLight];
+        [feedback impactOccurred];
+        [[MultitaskDockManager shared] cycleAppFrom:self.dataUUID direction:direction];
+        return;
     }
 
-    if (gesture.state == UIGestureRecognizerStateEnded) {
+    if (gesture.state == UIGestureRecognizerStateChanged) {
+        // Lift and pause: existing VibeContainers app switcher.
+        if (elapsed >= 0.40 && upward >= 32.0 && upward < 165.0 &&
+            upward > horizontal * 1.15 && fabs(velocity.y) < 900.0) {
+            self.appSwitcherGestureTriggered = YES;
+            UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc]
+                initWithStyle:UIImpactFeedbackStyleMedium];
+            [feedback impactOccurred];
+            [[MultitaskDockManager shared] presentAppSwitcher];
+            return;
+        }
+
+        // Fast upward flick: Vibe Home, while the guest remains alive.
+        if (elapsed < 0.30 && upward >= 86.0 && upward > horizontal * 1.10 &&
+            velocity.y < -650.0) {
+            self.appSwitcherGestureTriggered = YES;
+            [[MultitaskDockManager shared] returnToHostHome];
+            return;
+        }
+        return;
+    }
+
+    CGFloat predictedUpward = MAX(upward, -(translation.y + MIN(velocity.y, 0.0) * 0.08));
+    self.appSwitcherGestureTriggered = YES;
+    if (elapsed >= 0.34 && upward >= 28.0 && upward < 165.0) {
+        [[MultitaskDockManager shared] presentAppSwitcher];
+    } else if (upward >= 64.0 || predictedUpward >= 150.0) {
+        [[MultitaskDockManager shared] returnToHostHome];
+    } else if (upward >= 12.0) {
+        [[MultitaskDockManager shared] showDockForSystemGesture];
+    } else {
         self.appSwitcherGestureTriggered = NO;
     }
 }
 
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
-    if (gestureRecognizer != self.appSwitcherGesture) return YES;
-    // Initial velocity is frequently zero or diagonal during the first sample
-    // from the home-indicator region. Gate only on origin here and decide the
-    // direction from stable translation samples in the action method.
-    return [self canHandleAppSwitcherGesture:(UIPanGestureRecognizer *)gestureRecognizer];
+    if (gestureRecognizer == self.appSwitcherGesture) {
+        return [self canHandleAppSwitcherGesture:(UIPanGestureRecognizer *)gestureRecognizer];
+    }
+    return YES;
 }
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
@@ -377,8 +401,7 @@
 }
 
 - (UIRectEdge)preferredScreenEdgesDeferringSystemGestures {
-    if (self.usesPhoneFullscreenPresentation && self.isMaximized &&
-        !self.view.hidden) {
+    if (self.isMaximized && !self.view.hidden) {
         return UIRectEdgeBottom;
     }
     return [super preferredScreenEdgesDeferringSystemGestures];

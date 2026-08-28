@@ -156,6 +156,9 @@ class AppInfoProvider {
     /// gestures from the host window breaks Springboard taps and guest home
     /// gestures, so every installation is tracked explicitly.
     private var dockEdgeGestures: [UIScreenEdgePanGestureRecognizer] = []
+    /// Set only while the bottom gesture explicitly exposes the existing
+    /// multitasking dock on a phone. Normal launches stay edge-to-edge.
+    private var gestureDockOverride = false
 
     public struct Constants {
         // MARK: - Layout & Sizing
@@ -647,6 +650,64 @@ class AppInfoProvider {
         return false
     }
 
+    // MARK: - Vibe iPad-style bottom gestures
+
+    /// Reveal VibeContainers' Springboard without terminating guest processes.
+    @objc public func returnToHostHome() {
+        let action = {
+            _ = self.captureAppSwitcherPreviews()
+            _ = self.captureAppSwitcherPreviewViews()
+            self.gestureDockOverride = false
+            self.hideGuestSurfacesForAppSwitcher()
+            self.hideDock()
+            self.raiseHostedSurfaces()
+        }
+        if Thread.isMainThread { action() } else { DispatchQueue.main.async(execute: action) }
+    }
+
+    /// A short upward pull uses LiveContainer's existing multitasking dock.
+    @objc public func showDockForSystemGesture() {
+        let action = {
+            guard !self.apps.isEmpty else { return }
+            self.gestureDockOverride = true
+            self.raiseHostedSurfaces()
+            if self.isVisible {
+                if self.isDockHidden {
+                    self.showDockFromHidden()
+                } else {
+                    self.updateDockFrame()
+                }
+            } else {
+                self.showDock()
+            }
+        }
+        if Thread.isMainThread { action() } else { DispatchQueue.main.async(execute: action) }
+    }
+
+    /// Horizontal travel along the home indicator focuses the adjacent running
+    /// container through the existing focus path.
+    @objc(cycleAppFrom:direction:)
+    public func cycleApp(from currentUUID: String?, direction: Int) -> Bool {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard !apps.isEmpty else { return false }
+
+        let step = direction >= 0 ? 1 : -1
+        let currentIndex = currentUUID.flatMap { uuid in
+            apps.firstIndex(where: { $0.appUUID == uuid })
+        }
+        let targetIndex: Int
+        if let currentIndex {
+            if apps.count == 1 { return true }
+            targetIndex = (currentIndex + step + apps.count) % apps.count
+        } else {
+            targetIndex = step > 0 ? 0 : apps.count - 1
+        }
+
+        gestureDockOverride = false
+        hideDock()
+        return focusAppResult(apps[targetIndex].appUUID) == 0
+    }
+
     /// Reveals VibeContainers' adaptive app switcher after clearing the guest
     /// windows from the host surface. The processes themselves keep running.
     @objc public func presentAppSwitcher() {
@@ -755,6 +816,7 @@ class AppInfoProvider {
     }
     
     @objc public func hideDock() {
+        gestureDockOverride = false
         guard isVisible, let hostingController = hostingController else { return }
         
         DispatchQueue.main.async {
@@ -1306,6 +1368,7 @@ class AppInfoProvider {
     
     // MARK: - Multitask Mode Check
     private func isDockEnabled() -> Bool {
+        if gestureDockOverride { return true }
         // Phones present a single edge-to-edge guest and use the host's
         // full-screen card switcher. The floating dock/window rail is the iPad
         // Stage Manager affordance and should never cover a phone app scene.

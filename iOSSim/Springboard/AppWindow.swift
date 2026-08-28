@@ -23,11 +23,13 @@ struct AppWindow: View {
     /// touch-up merely because its final predicted Y velocity is large.
     @State private var closeGestureAxis: Axis?
     @State private var closeGestureStart: CGPoint?
+    @State private var closeGestureBeganAt: TimeInterval = 0
 
     @Environment(\.deviceSafeArea) private var safeArea
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
 
     private var appearance: Appearance { Appearance.shared }
+    private var runningContainers: RunningContainerStore { .shared }
     private var motionDisabled: Bool {
         accessibilityReduceMotion || appearance.reduceMotion
     }
@@ -87,6 +89,15 @@ struct AppWindow: View {
         // Reduce Motion keeps the surface full-screen and cross-fades it as a
         // unit; normal motion keeps the background opaque during the morph.
         .opacity(motionDisabled ? (revealed ? 1 : 0) : 1)
+        .overlay(alignment: .bottom) {
+            if revealed && !transitionActive {
+                Capsule()
+                    .fill(SysColor.label.opacity(0.78))
+                    .frame(width: 122, height: 5)
+                    .padding(.bottom, max(7, safeArea.bottom > 0 ? 7 : 11))
+                    .allowsHitTesting(false)
+            }
+        }
         .allowsHitTesting(revealed && !transitionActive)
         .simultaneousGesture(closeGesture)
     }
@@ -137,24 +148,49 @@ struct AppWindow: View {
         }
     }
 
-    /// Swipe up from the bottom edge to go home.
+    /// iPad-style bottom gestures: short swipe = Dock, quick swipe = Home,
+    /// swipe-and-hold = app switcher, horizontal = adjacent running app.
     private var closeGesture: some Gesture {
-        DragGesture(minimumDistance: 14, coordinateSpace: .global)
+        DragGesture(minimumDistance: 12, coordinateSpace: .global)
             .onChanged(updateCloseGesture)
             .onEnded { value in
-                let acceptedVertical = closeGestureAxis == .vertical
+                let axis = closeGestureAxis
+                let elapsed = max(0, Date.timeIntervalSinceReferenceDate - closeGestureBeganAt)
                 closeGestureAxis = nil
                 closeGestureStart = nil
+                closeGestureBeganAt = 0
 
-                guard acceptedVertical,
-                      value.startLocation.y > screen.height - 70 else {
+                guard value.startLocation.y > screen.height - 70 else {
                     settleDismissal()
                     return
                 }
-                let upwardTravel = -value.translation.height
-                let predictedUpwardTravel = -value.predictedEndTranslation.height
-                if upwardTravel > 50 || predictedUpwardTravel > 180 {
+
+                if axis == .horizontal {
+                    let horizontal = abs(value.translation.width)
+                    guard horizontal > 48 else {
+                        settleDismissal()
+                        return
+                    }
+                    switchToRunningContainer(direction: value.translation.width < 0 ? 1 : -1)
+                    return
+                }
+
+                guard axis == .vertical else {
+                    settleDismissal()
+                    return
+                }
+
+                let upwardTravel = max(0, -value.translation.height)
+                let predictedUpwardTravel = max(upwardTravel, -value.predictedEndTranslation.height)
+
+                if elapsed >= 0.34, upwardTravel >= 28, upwardTravel < 165,
+                   !runningContainers.visibleEntries.isEmpty {
+                    openContainerSwitcher()
+                } else if upwardTravel >= 64 || predictedUpwardTravel >= 150 {
                     onClose()
+                } else if upwardTravel >= 12 {
+                    _ = runningContainers.showGestureDock()
+                    settleDismissal()
                 } else {
                     settleDismissal()
                 }
@@ -168,6 +204,7 @@ struct AppWindow: View {
         if closeGestureStart != value.startLocation {
             closeGestureStart = value.startLocation
             closeGestureAxis = nil
+            closeGestureBeganAt = Date.timeIntervalSinceReferenceDate
         }
 
         let horizontalTravel = abs(value.translation.width)
@@ -193,6 +230,28 @@ struct AppWindow: View {
 
         let interactiveTravel = max(120, min(220, screen.height * 0.20))
         dismissalProgress = min(1, upwardTravel / interactiveTravel)
+    }
+
+    private func openContainerSwitcher() {
+        interactiveDismissal = 0
+        onClose()
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(230))
+            _ = runningContainers.presentCapturedSwitcher()
+        }
+    }
+
+    private func switchToRunningContainer(direction: Int32) {
+        guard !runningContainers.activeEntries.isEmpty else {
+            settleDismissal()
+            return
+        }
+        interactiveDismissal = 0
+        onClose()
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(230))
+            _ = runningContainers.cycleFromHost(direction: direction)
+        }
     }
 
     private func settleDismissal() {

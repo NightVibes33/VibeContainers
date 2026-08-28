@@ -12,6 +12,15 @@ private func IOSSimTerminateMultitaskGuest(_ dataUUID: UnsafePointer<CChar>) -> 
 @_silgen_name("IOSSimPresentMultitaskSwitcher")
 private func IOSSimPresentMultitaskSwitcher() -> Int32
 
+@_silgen_name("IOSSimReturnMultitaskHome")
+private func IOSSimReturnMultitaskHome() -> Int32
+
+@_silgen_name("IOSSimShowMultitaskDock")
+private func IOSSimShowMultitaskDock() -> Int32
+
+@_silgen_name("IOSSimCycleMultitaskGuest")
+private func IOSSimCycleMultitaskGuest(_ dataUUID: UnsafePointer<CChar>?, _ direction: Int32) -> Int32
+
 /// The host-side view of LiveContainer's independently running guest scenes.
 ///
 /// LiveContainer remains the source of truth for the actual UIKit scenes. This
@@ -211,6 +220,21 @@ final class RunningContainerStore: NSObject {
             return true
         }
         return false
+    }
+
+    @discardableResult
+    func returnToVibeHome() -> Bool {
+        IOSSimReturnMultitaskHome() == 0
+    }
+
+    @discardableResult
+    func showGestureDock() -> Bool {
+        IOSSimShowMultitaskDock() == 0
+    }
+
+    @discardableResult
+    func cycleFromHost(direction: Int32) -> Bool {
+        IOSSimCycleMultitaskGuest(nil, direction) == 0
     }
 
     func presentSwitcher() {

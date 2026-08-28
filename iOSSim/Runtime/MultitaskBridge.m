@@ -141,6 +141,36 @@ int32_t IOSSimPresentMultitaskSwitcher(void) {
     return 0;
 }
 
+int32_t IOSSimReturnMultitaskHome(void) {
+    if (![NSThread isMainThread]) return EDEADLK;
+    id manager = IOSSimMultitaskManager();
+    SEL selector = NSSelectorFromString(@"returnToHostHome");
+    if (!manager || ![manager respondsToSelector:selector]) return ENOSYS;
+    ((void (*)(id, SEL))objc_msgSend)(manager, selector);
+    return 0;
+}
+
+int32_t IOSSimShowMultitaskDock(void) {
+    if (![NSThread isMainThread]) return EDEADLK;
+    id manager = IOSSimMultitaskManager();
+    SEL selector = NSSelectorFromString(@"showDockForSystemGesture");
+    if (!manager || ![manager respondsToSelector:selector]) return ENOSYS;
+    ((void (*)(id, SEL))objc_msgSend)(manager, selector);
+    return 0;
+}
+
+int32_t IOSSimCycleMultitaskGuest(const char *dataUUIDBytes, int32_t direction) {
+    if (![NSThread isMainThread]) return EDEADLK;
+    NSString *dataUUID = dataUUIDBytes ? [NSString stringWithUTF8String:dataUUIDBytes] : nil;
+    id manager = IOSSimMultitaskManager();
+    SEL selector = NSSelectorFromString(@"cycleAppFrom:direction:");
+    if (!manager || ![manager respondsToSelector:selector]) return ENOSYS;
+    BOOL focused = ((BOOL (*)(id, SEL, NSString *, NSInteger))objc_msgSend)(
+        manager, selector, dataUUID, (NSInteger)direction
+    );
+    return focused ? 0 : ENOENT;
+}
+
 int32_t IOSSimTerminateMultitaskGuests(void) {
     if (![NSThread isMainThread]) return EDEADLK;
     SEL terminateSelector = NSSelectorFromString(@"terminateAllApps");

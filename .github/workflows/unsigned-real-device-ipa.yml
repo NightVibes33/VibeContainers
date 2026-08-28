@@ -44,6 +44,7 @@ jobs:
           python3 scripts/apply_ipad_gestures_v4.py
           python3 scripts/apply_ipad_gestures_v5.py
           python3 scripts/apply_ipad_gestures_v6.py
+          python3 scripts/apply_guest_switcher_layer_v7.py
           python3 scripts/apply_home_layout_persistence.py
 
           # A restored custom layout must never be auto-packed back into Dock.
@@ -63,6 +64,11 @@ jobs:
             echo "Gesture surface still overlaps the physical iOS Home edge" >&2
             exit 1
           fi
+
+          # Guest-originated switcher presentation must demote LiveContainer's
+          # UIKit host so SwiftUI's ContainerSwitcherView can actually appear.
+          grep -Fq 'guest host demoted below SwiftUI switcher' LiveContainer-3.8.0/MultitaskSupport/MultitaskDockView.swift
+          grep -Fq 'rootView.sendSubviewToBack(windowHostingView)' LiveContainer-3.8.0/MultitaskSupport/MultitaskDockView.swift
 
       - name: Persist source fixes to main
         shell: bash
@@ -93,7 +99,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "4189828+github-actions[bot]@users.noreply.github.com"
           git add -- "${FILES[@]}"
-          git commit -m "Persist Vibe gesture v6 and custom Home layout [skip ci]"
+          git commit -m "Persist Vibe guest switcher layer fix [skip ci]"
           git push origin HEAD:main
 
       - name: Show toolchain
@@ -172,7 +178,7 @@ jobs:
           grep -Eqi 'platform[[:space:]]+(IOS|2)' "$RUNNER_TEMP/vtool.txt"
 
           # A green compile is not enough: prove the framework inside the IPA
-          # actually contains the host-owned gesture runtime.
+          # actually contains the host-owned gesture and guest switcher runtime.
           strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: host bottom gesture surface installed'
           strings "$LC_FRAMEWORK" | grep -F 'VibeContainers.SystemGestureSurface'
           strings "$LC_FRAMEWORK" | grep -F 'per-window bottom grabber disabled; host owns bottom gestures'
@@ -180,6 +186,7 @@ jobs:
           strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: rebound guest UIView'
           strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: app-owned bottom gesture strip'
           strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: bottom gesture cancelled; using cached translation'
+          strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: guest host demoted below SwiftUI switcher'
           strings "$LC_FRAMEWORK" | grep -F 'hiding guest surfaces registered='
           strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: Dock hosting controller ready'
           strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: Home gesture committed immediately'

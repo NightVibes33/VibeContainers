@@ -320,11 +320,6 @@ enum ZipArchive {
         input: FileHandle,
         output: FileHandle
     ) throws {
-        if entry.uncompressedSize == 0 {
-            // Empty deflate streams still have compressed framing bytes. Feed
-            // them through the decoder so corrupt archives do not silently pass.
-        }
-
         var stream = compression_stream()
         guard compression_stream_init(
             &stream,
@@ -347,6 +342,9 @@ enum ZipArchive {
                 throw ZipError.truncated
             }
             remaining -= chunk.count
+            let flags = remaining == 0
+                ? Int32(COMPRESSION_STREAM_FINALIZE.rawValue)
+                : Int32(0)
 
             try chunk.withUnsafeBytes { rawSource in
                 let source = rawSource.bindMemory(to: UInt8.self)
@@ -354,14 +352,14 @@ enum ZipArchive {
                 stream.src_ptr = sourceBase
                 stream.src_size = source.count
 
-                while stream.src_size > 0 {
+                repeat {
                     let before = stream.src_size
                     var produced = 0
                     let status = outputBuffer.withUnsafeMutableBytes { rawDestination -> compression_status in
                         let destination = rawDestination.bindMemory(to: UInt8.self)
                         stream.dst_ptr = destination.baseAddress!
                         stream.dst_size = outputCapacity
-                        let result = compression_stream_process(&stream, 0)
+                        let result = compression_stream_process(&stream, flags)
                         produced = outputCapacity - stream.dst_size
                         return result
                     }
@@ -375,18 +373,22 @@ enum ZipArchive {
                     }
 
                     if status == COMPRESSION_STATUS_END {
+                        // A decoder that ends before consuming the entry's declared
+                        // compressed bytes indicates a malformed central directory.
+                        guard stream.src_size == 0 else { throw ZipError.inflateFailed }
                         reachedEnd = true
                         break
                     }
                     if status == COMPRESSION_STATUS_ERROR {
                         throw ZipError.inflateFailed
                     }
-                    // A valid decoder call must consume input or emit output.
-                    // Guarding this prevents a malformed stream from spinning.
+                    // With FINALIZE set, a zero-length source may need another
+                    // call to flush output and return END. Any call that neither
+                    // consumes nor produces data cannot make forward progress.
                     if stream.src_size == before && produced == 0 {
                         throw ZipError.inflateFailed
                     }
-                }
+                } while stream.src_size > 0 || flags != 0
             }
         }
 

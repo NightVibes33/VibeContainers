@@ -39,6 +39,7 @@ jobs:
           python3 scripts/apply_installer_fixes.py
           python3 scripts/apply_installer_followups.py
           python3 scripts/apply_xcode26_fixes.py
+          python3 scripts/apply_ipad_gestures.py
 
       - name: Persist source fixes to main
         shell: bash
@@ -47,21 +48,26 @@ jobs:
           FILES=(
             iOSSim/Model/GuestInstaller.swift
             iOSSim/Model/PackageStore.swift
+            iOSSim/Model/RunningContainerStore.swift
             iOSSim/Apps/PackagesView.swift
             iOSSim/Apps/GuestContainerView.swift
             iOSSim/Model/ZipArchive.swift
             iOSSim/Apps/SettingsIcons.swift
+            iOSSim/Springboard/AppWindow.swift
             iOSSim/Springboard/PageTransition.swift
             iOSSim/Springboard/SpringboardView.swift
+            iOSSim/Runtime/MultitaskBridge.m
+            LiveContainer-3.8.0/MultitaskSupport/DecoratedAppSceneViewController.m
+            LiveContainer-3.8.0/MultitaskSupport/MultitaskDockView.swift
           )
           if git diff --quiet -- "${FILES[@]}"; then
             echo "Source already contains the fixes."
             exit 0
           fi
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.email "4189828+github-actions[bot]@users.noreply.github.com"
           git add -- "${FILES[@]}"
-          git commit -m "Fix IPA pipeline and Xcode 26.2 build [skip ci]"
+          git commit -m "Add iPad-style multitasking gestures [skip ci]"
           git push origin HEAD:main
 
       - name: Show toolchain

@@ -474,12 +474,62 @@ class_anchor = '''extension Notification.Name {
 '''
 host_classes = r'''/// Full-screen host that deliberately passes every touch except the bottom
 /// 70pt through to the LiveContainer guest underneath it.
-private final class GuestSpringboardControlPassthroughView: UIView {
+private final class GuestSpringboardControlPassthroughView: UIView, UIGestureRecognizerDelegate {
     var bottomHitHeight: CGFloat = 70
+    var canOpenSwitcher = false
+    var onHome: (() -> Void)?
+    var onSwitcher: (() -> Void)?
+    var onDock: (() -> Void)?
+    var onCycle: ((Int32) -> Void)?
+
+    private lazy var bottomPan: UIPanGestureRecognizer = {
+        let recognizer = UIPanGestureRecognizer(target: self, action: #selector(handleBottomPan(_:)))
+        recognizer.delegate = self
+        recognizer.maximumNumberOfTouches = 1
+        recognizer.cancelsTouchesInView = true
+        return recognizer
+    }()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        addGestureRecognizer(bottomPan)
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        addGestureRecognizer(bottomPan)
+    }
 
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
         guard super.point(inside: point, with: event) else { return false }
         return point.y >= bounds.height - bottomHitHeight
+    }
+
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard gestureRecognizer === bottomPan else { return true }
+        let start = gestureRecognizer.location(in: self)
+        guard start.y >= bounds.height - bottomHitHeight else { return false }
+        let velocity = bottomPan.velocity(in: self)
+        return abs(velocity.x) > 20 || velocity.y < -20
+    }
+
+    @objc private func handleBottomPan(_ recognizer: UIPanGestureRecognizer) {
+        guard recognizer.state == .ended else { return }
+        let translation = recognizer.translation(in: self)
+        let velocity = recognizer.velocity(in: self)
+        let horizontal = abs(translation.x)
+        let upward = max(0, -translation.y)
+
+        if horizontal > max(48, upward * 1.15) {
+            onCycle?(translation.x < 0 ? 1 : -1)
+        } else if canOpenSwitcher, upward >= 28, upward < 165,
+                  abs(velocity.y) < 900 {
+            onSwitcher?()
+        } else if upward >= 64 || velocity.y <= -900 {
+            onHome?()
+        } else if upward >= 12 {
+            onDock?()
+        }
     }
 }
 
@@ -515,6 +565,11 @@ private final class GuestSpringboardControlHost {
         container.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         container.isHidden = false
         container.isUserInteractionEnabled = true
+        container.canOpenSwitcher = canOpenSwitcher
+        container.onHome = onHome
+        container.onSwitcher = onSwitcher
+        container.onDock = onDock
+        container.onCycle = onCycle
 
         if container.superview !== rootView {
             container.removeFromSuperview()
@@ -569,6 +624,10 @@ private final class GuestSpringboardControlHost {
 
         controller.view.frame = container.bounds
         controller.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        // The shared SwiftUI modifier draws the exact AppWindow bar. UIKit
+        // owns guest input so a transparent hosting view cannot swallow the
+        // bottom pan before the reliable host recognizer sees it.
+        controller.view.isUserInteractionEnabled = false
         rootView.bringSubviewToFront(container)
         NSLog("VibeContainers: exact AppWindow Springboard control hosted full-screen")
     }

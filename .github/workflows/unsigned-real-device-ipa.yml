@@ -65,6 +65,8 @@ jobs:
           grep -Fq 'SpringboardBottomControlModifier(' iOSSim/Model/RunningContainerStore.swift
           grep -Fq 'VibeContainers.ExactAppWindowGuestControlHost' iOSSim/Model/RunningContainerStore.swift
           grep -Fq 'exact AppWindow Springboard control hosted full-screen' iOSSim/Model/RunningContainerStore.swift
+          grep -Fq 'UIPanGestureRecognizer(target: self, action: #selector(handleBottomPan(_:)))' iOSSim/Model/RunningContainerStore.swift
+          grep -Fq 'controller.view.isUserInteractionEnabled = false' iOSSim/Model/RunningContainerStore.swift
 
           # LiveContainer owns guest lifecycle only. It must not draw/classify a
           # second bar; it merely tells the app-target control when to appear.

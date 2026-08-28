@@ -39,11 +39,7 @@ jobs:
           python3 scripts/apply_installer_fixes.py
           python3 scripts/apply_installer_followups.py
           python3 scripts/apply_xcode26_fixes.py
-          python3 scripts/apply_ipad_gestures_v2.py
           python3 scripts/apply_virtual_host_lock.py
-          python3 scripts/apply_ipad_gestures_v4.py
-          python3 scripts/apply_ipad_gestures_v5.py
-          python3 scripts/apply_ipad_gestures_v6.py
           python3 scripts/apply_guest_switcher_layer_v7.py
           python3 scripts/apply_guest_bar_position_v8.py
           python3 scripts/apply_home_layout_persistence.py

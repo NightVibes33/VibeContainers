@@ -1,12 +1,14 @@
 import Foundation
 import Compression
 
-/// A minimal ZIP reader, enough to unpack an `.ipa`.
+/// A ZIP reader specialized for IPA imports.
 ///
-/// iOS ships no `unzip` binary and `Foundation.Process` is macOS-only, so an
-/// IPA has to be taken apart by hand. IPAs use only two storage methods —
-/// stored (0) and deflate (8) — and both are handled here by walking the
-/// central directory and inflating each entry with the Compression framework.
+/// The central directory is memory-mapped so metadata stays cheap even for a
+/// large IPA, while file payloads are read and decompressed in bounded chunks.
+/// We never materialize the whole compressed entry and whole expanded entry at
+/// the same time. This keeps large executables/frameworks from causing memory
+/// spikes and lets disk-space failures be detected before a partial Payload is
+/// written.
 enum ZipArchive {
     struct Entry {
         let path: String
@@ -15,7 +17,7 @@ enum ZipArchive {
         let uncompressedSize: Int
         let localHeaderOffset: Int
         let isDirectory: Bool
-        /// bit 0 of the external attributes' unix mode == executable.
+        /// Full Unix mode from ZIP external attributes when present.
         let unixMode: UInt16
     }
 
@@ -26,22 +28,40 @@ enum ZipArchive {
         case inflateFailed
         case unsafePath(String)
         case archiveTooLarge
+        case insufficientSpace(required: Int64, available: Int64)
+        case cannotCreateOutput(String)
 
         var errorDescription: String? {
             switch self {
-            case .notAZip: "The selected file is not a ZIP archive."
-            case .truncated: "The archive is incomplete or damaged."
-            case .unsupportedMethod(let method): "The archive uses unsupported compression method \(method)."
-            case .inflateFailed: "The archive could not be decompressed."
-            case .unsafePath: "The archive contains an unsafe file path."
-            case .archiveTooLarge: "The archive is too large to import safely."
+            case .notAZip:
+                "The selected file is not a ZIP archive."
+            case .truncated:
+                "The archive is incomplete or damaged."
+            case .unsupportedMethod(let method):
+                "The archive uses unsupported compression method \(method)."
+            case .inflateFailed:
+                "The archive could not be decompressed."
+            case .unsafePath:
+                "The archive contains an unsafe file path."
+            case .archiveTooLarge:
+                "The archive is too large to import safely."
+            case .insufficientSpace(let required, let available):
+                "This IPA needs about \(Self.mb(required)) MB free to unpack; only \(Self.mb(available)) MB is currently available."
+            case .cannotCreateOutput(let path):
+                "Could not create an extracted file at \(path)."
             }
+        }
+
+        private static func mb(_ bytes: Int64) -> Int64 {
+            max(0, (bytes + 1_048_575) / 1_048_576)
         }
     }
 
+    private static let ioChunkSize = 256 * 1_024
+    private static let minimumFreeReserve: Int64 = 32 * 1_024 * 1_024
+
     /// Extracts the whole archive under `destination`, returning the executable
-    /// bits so the unpacker can restore them (an IPA's main binary must stay
-    /// executable to be dlopen'd).
+    /// bits so the installer can restore them after all files are present.
     @discardableResult
     static func extract(
         _ archiveURL: URL,
@@ -49,51 +69,105 @@ enum ZipArchive {
         maximumUncompressedBytes: Int? = nil,
         maximumEntries: Int? = nil
     ) throws -> [String: UInt16] {
+        // `.mappedIfSafe` maps the archive instead of eagerly copying all IPA
+        // bytes into heap memory. Only central-directory/header bytes are read
+        // from this Data; actual file payloads stream through FileHandle below.
         let data = try Data(contentsOf: archiveURL, options: .mappedIfSafe)
         let entries = try readCentralDirectory(data)
 
         if let maximumEntries, entries.count > maximumEntries {
             throw ZipError.archiveTooLarge
         }
-        if let maximumUncompressedBytes {
-            var total = 0
-            for entry in entries {
-                guard entry.uncompressedSize <= maximumUncompressedBytes - total else {
-                    throw ZipError.archiveTooLarge
-                }
-                total += entry.uncompressedSize
+
+        var totalUncompressed: Int64 = 0
+        for entry in entries {
+            let size = Int64(entry.uncompressedSize)
+            guard size >= 0, totalUncompressed <= Int64.max - size else {
+                throw ZipError.archiveTooLarge
+            }
+            totalUncompressed += size
+            if let maximumUncompressedBytes,
+               totalUncompressed > Int64(maximumUncompressedBytes) {
+                throw ZipError.archiveTooLarge
             }
         }
 
         let manager = FileManager.default
-        var modes: [String: UInt16] = [:]
-
         let root = destination.standardizedFileURL
         try manager.createDirectory(at: root, withIntermediateDirectories: true)
+        try preflightFreeSpace(for: totalUncompressed, at: root)
 
+        // Validate every pathname before writing the first archive entry. A bad
+        // source cannot leave a partly extracted tree outside/inside staging.
+        for entry in entries where !isMobileContainerManagerMetadata(entry.path) {
+            _ = try safeOutputURL(for: entry.path, under: root)
+        }
+
+        let input = try FileHandle(forReadingFrom: archiveURL)
+        defer { try? input.close() }
+
+        var modes: [String: UInt16] = [:]
         for entry in entries {
-            // Some repackaged IPAs accidentally contain the private marker
-            // MobileContainerManager places at the root of an application's
-            // data container.  The sandbox deliberately rejects attempts to
-            // create that system-owned filename, and it is never part of an
-            // application bundle's runnable payload.  Ignore it anywhere in
-            // an imported archive instead of aborting an otherwise valid app
-            // install with a misleading permission error.
+            // Repackaged IPAs sometimes carry this private container marker.
+            // It is not part of the runnable app bundle and iOS can reject it.
             if isMobileContainerManagerMetadata(entry.path) { continue }
 
             let outURL = try safeOutputURL(for: entry.path, under: root)
             if entry.isDirectory {
-                try? manager.createDirectory(at: outURL, withIntermediateDirectories: true)
+                try manager.createDirectory(at: outURL, withIntermediateDirectories: true)
                 continue
             }
-            try? manager.createDirectory(at: outURL.deletingLastPathComponent(),
-                                         withIntermediateDirectories: true)
 
-            let payload = try inflate(entry, from: data)
-            try payload.write(to: outURL)
+            try manager.createDirectory(
+                at: outURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            if manager.fileExists(atPath: outURL.path) {
+                try manager.removeItem(at: outURL)
+            }
+            guard manager.createFile(atPath: outURL.path, contents: nil) else {
+                throw ZipError.cannotCreateOutput(entry.path)
+            }
+
+            do {
+                let dataStart = try localDataStart(for: entry, in: data)
+                try input.seek(toOffset: UInt64(dataStart))
+                let output = try FileHandle(forWritingTo: outURL)
+                defer { try? output.close() }
+
+                switch entry.compressionMethod {
+                case 0:
+                    try copyStored(entry, input: input, output: output)
+                case 8:
+                    try inflateDeflate(entry, input: input, output: output)
+                default:
+                    throw ZipError.unsupportedMethod(entry.compressionMethod)
+                }
+            } catch {
+                try? manager.removeItem(at: outURL)
+                throw error
+            }
+
             if entry.unixMode != 0 { modes[entry.path] = entry.unixMode }
         }
         return modes
+    }
+
+    private static func preflightFreeSpace(for expandedBytes: Int64, at root: URL) throws {
+        guard expandedBytes > 0 else { return }
+        let values = try? root.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        guard let available = values?.volumeAvailableCapacityForImportantUsage,
+              available >= 0 else { return }
+
+        // Keep a modest reserve for metadata, code signing and plist writes.
+        // Five percent scales for large apps; 32 MiB avoids running the volume
+        // completely dry for smaller imports.
+        let reserve = max(minimumFreeReserve, expandedBytes / 20)
+        guard expandedBytes <= Int64.max - reserve else { throw ZipError.archiveTooLarge }
+        let required = expandedBytes + reserve
+        guard available >= required else {
+            throw ZipError.insufficientSpace(required: required, available: available)
+        }
     }
 
     private static func isMobileContainerManagerMetadata(_ path: String) -> Bool {
@@ -102,8 +176,7 @@ enum ZipArchive {
     }
 
     /// ZIP paths are attacker-controlled. Keep every entry beneath the chosen
-    /// extraction directory so a crafted IPA or Tendies file cannot write into
-    /// the app container with `../` or an absolute path.
+    /// extraction directory so a crafted IPA cannot write outside staging.
     private static func safeOutputURL(for path: String, under root: URL) throws -> URL {
         guard !path.isEmpty,
               !path.hasPrefix("/"),
@@ -124,10 +197,8 @@ enum ZipArchive {
     // MARK: - Central directory
 
     private static func readCentralDirectory(_ data: Data) throws -> [Entry] {
-        // Locate the End Of Central Directory record, scanning back from the
-        // tail (there may be a comment after it).
         let eocdSignature: UInt32 = 0x0605_4b50
-        guard data.count > 22 else { throw ZipError.truncated }
+        guard data.count >= 22 else { throw ZipError.truncated }
 
         var eocd = -1
         let lowerBound = max(0, data.count - 22 - 0xFFFF)
@@ -139,23 +210,41 @@ enum ZipArchive {
         guard eocd >= 0 else { throw ZipError.notAZip }
 
         let entryCount = Int(data.u16(eocd + 10))
-        var offset = Int(data.u32(eocd + 16))     // start of central directory
+        var offset = Int(data.u32(eocd + 16))
+
+        // Classic IPA ZIPs fit in 32-bit central-directory fields. Reject a
+        // Zip64 sentinel explicitly instead of mis-parsing offsets as 4 GiB.
+        if entryCount == 0xFFFF || data.u32(eocd + 16) == 0xFFFF_FFFF {
+            throw ZipError.archiveTooLarge
+        }
 
         let cdSignature: UInt32 = 0x0201_4b50
         var entries: [Entry] = []
         entries.reserveCapacity(entryCount)
 
         for _ in 0..<entryCount {
-            guard offset + 46 <= data.count, data.u32(offset) == cdSignature else {
+            guard offset >= 0,
+                  offset + 46 <= data.count,
+                  data.u32(offset) == cdSignature else {
                 throw ZipError.truncated
             }
+
             let method = data.u16(offset + 10)
-            let compressed = Int(data.u32(offset + 20))
-            let uncompressed = Int(data.u32(offset + 24))
+            let compressedRaw = data.u32(offset + 20)
+            let uncompressedRaw = data.u32(offset + 24)
+            let localHeaderRaw = data.u32(offset + 42)
+            if compressedRaw == 0xFFFF_FFFF
+                || uncompressedRaw == 0xFFFF_FFFF
+                || localHeaderRaw == 0xFFFF_FFFF {
+                throw ZipError.archiveTooLarge
+            }
+
+            let compressed = Int(compressedRaw)
+            let uncompressed = Int(uncompressedRaw)
             let nameLen = Int(data.u16(offset + 28))
             let extraLen = Int(data.u16(offset + 30))
             let commentLen = Int(data.u16(offset + 32))
-            let localHeader = Int(data.u32(offset + 42))
+            let localHeader = Int(localHeaderRaw)
             let externalAttrs = data.u32(offset + 38)
             let unixMode = UInt16((externalAttrs >> 16) & 0xFFFF)
 
@@ -182,53 +271,130 @@ enum ZipArchive {
         return entries
     }
 
-    // MARK: - Inflate
-
-    private static func inflate(_ entry: Entry, from data: Data) throws -> Data {
-        // The local header repeats the name/extra lengths; the payload starts
-        // after them, not at a fixed offset from the central-directory record.
+    private static func localDataStart(for entry: Entry, in data: Data) throws -> Int {
         let local = entry.localHeaderOffset
-        guard local + 30 <= data.count, data.u32(local) == 0x0403_4b50 else {
+        guard local >= 0,
+              local + 30 <= data.count,
+              data.u32(local) == 0x0403_4b50 else {
             throw ZipError.truncated
         }
         let nameLen = Int(data.u16(local + 26))
         let extraLen = Int(data.u16(local + 28))
         let dataStart = local + 30 + nameLen + extraLen
         guard dataStart >= 0,
-              entry.compressedSize >= 0,
               dataStart <= data.count,
+              entry.compressedSize >= 0,
               entry.compressedSize <= data.count - dataStart else {
             throw ZipError.truncated
         }
-        let compressed = data.subdata(in: dataStart..<dataStart + entry.compressedSize)
+        return dataStart
+    }
 
-        switch entry.compressionMethod {
-        case 0:
-            return compressed
-        case 8:
-            return try rawInflate(compressed, expected: entry.uncompressedSize)
-        default:
-            throw ZipError.unsupportedMethod(entry.compressionMethod)
+    // MARK: - Streaming payload extraction
+
+    private static func copyStored(
+        _ entry: Entry,
+        input: FileHandle,
+        output: FileHandle
+    ) throws {
+        var remaining = entry.compressedSize
+        var written = 0
+
+        while remaining > 0 {
+            let count = min(ioChunkSize, remaining)
+            guard let chunk = try input.read(upToCount: count), !chunk.isEmpty else {
+                throw ZipError.truncated
+            }
+            try output.write(contentsOf: chunk)
+            remaining -= chunk.count
+            written += chunk.count
+        }
+
+        guard written == entry.uncompressedSize else {
+            throw ZipError.truncated
         }
     }
 
-    /// Apple's `COMPRESSION_ZLIB` codec is raw DEFLATE (RFC 1951), which is
-    /// exactly what ZIP method 8 stores — no zlib wrapper to strip.
-    private static func rawInflate(_ input: Data, expected: Int) throws -> Data {
-        guard expected > 0 else { return Data() }
-        var output = Data(count: expected)
+    private static func inflateDeflate(
+        _ entry: Entry,
+        input: FileHandle,
+        output: FileHandle
+    ) throws {
+        if entry.uncompressedSize == 0 {
+            // Empty deflate streams still have compressed framing bytes. Feed
+            // them through the decoder so corrupt archives do not silently pass.
+        }
 
-        let written = output.withUnsafeMutableBytes { dst -> Int in
-            input.withUnsafeBytes { src in
-                compression_decode_buffer(
-                    dst.bindMemory(to: UInt8.self).baseAddress!, expected,
-                    src.bindMemory(to: UInt8.self).baseAddress!, input.count,
-                    nil, COMPRESSION_ZLIB
-                )
+        var stream = compression_stream()
+        guard compression_stream_init(
+            &stream,
+            COMPRESSION_STREAM_DECODE,
+            COMPRESSION_ZLIB
+        ) != COMPRESSION_STATUS_ERROR else {
+            throw ZipError.inflateFailed
+        }
+        defer { compression_stream_destroy(&stream) }
+
+        var remaining = entry.compressedSize
+        var totalWritten = 0
+        var reachedEnd = false
+        var outputBuffer = [UInt8](repeating: 0, count: ioChunkSize)
+        let outputCapacity = outputBuffer.count
+
+        while remaining > 0 && !reachedEnd {
+            let count = min(ioChunkSize, remaining)
+            guard let chunk = try input.read(upToCount: count), !chunk.isEmpty else {
+                throw ZipError.truncated
+            }
+            remaining -= chunk.count
+
+            try chunk.withUnsafeBytes { rawSource in
+                let source = rawSource.bindMemory(to: UInt8.self)
+                guard let sourceBase = source.baseAddress else { return }
+                stream.src_ptr = sourceBase
+                stream.src_size = source.count
+
+                while stream.src_size > 0 {
+                    let before = stream.src_size
+                    var produced = 0
+                    let status = outputBuffer.withUnsafeMutableBytes { rawDestination -> compression_status in
+                        let destination = rawDestination.bindMemory(to: UInt8.self)
+                        stream.dst_ptr = destination.baseAddress!
+                        stream.dst_size = outputCapacity
+                        let result = compression_stream_process(&stream, 0)
+                        produced = outputCapacity - stream.dst_size
+                        return result
+                    }
+
+                    if produced > 0 {
+                        try output.write(contentsOf: Data(outputBuffer.prefix(produced)))
+                        totalWritten += produced
+                        if totalWritten > entry.uncompressedSize {
+                            throw ZipError.inflateFailed
+                        }
+                    }
+
+                    if status == COMPRESSION_STATUS_END {
+                        reachedEnd = true
+                        break
+                    }
+                    if status == COMPRESSION_STATUS_ERROR {
+                        throw ZipError.inflateFailed
+                    }
+                    // A valid decoder call must consume input or emit output.
+                    // Guarding this prevents a malformed stream from spinning.
+                    if stream.src_size == before && produced == 0 {
+                        throw ZipError.inflateFailed
+                    }
+                }
             }
         }
-        guard written == expected else { throw ZipError.inflateFailed }
-        return output
+
+        guard reachedEnd,
+              remaining == 0,
+              totalWritten == entry.uncompressedSize else {
+            throw ZipError.inflateFailed
+        }
     }
 }
 
@@ -238,6 +404,7 @@ private extension Data {
     func u16(_ offset: Int) -> UInt16 {
         UInt16(self[offset]) | (UInt16(self[offset + 1]) << 8)
     }
+
     func u32(_ offset: Int) -> UInt32 {
         UInt32(self[offset]) | (UInt32(self[offset + 1]) << 8)
             | (UInt32(self[offset + 2]) << 16) | (UInt32(self[offset + 3]) << 24)

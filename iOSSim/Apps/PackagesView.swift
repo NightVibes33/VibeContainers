@@ -526,7 +526,8 @@ private struct InstalledTab: View {
                                 last: pending.id == store.updates.last?.id,
                                 action: store.action(
                                     for: pending.app,
-                                    sourceName: pending.sourceName
+                                    sourceName: pending.sourceName,
+                                    sourceID: pending.sourceID
                                 )
                             )
                         }

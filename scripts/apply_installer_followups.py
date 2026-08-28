@@ -21,6 +21,15 @@ def update(path: Path, transform) -> None:
 
 
 def fix_package(text: str) -> str:
+    installed_source_fixed = '''        var version: String\n        var sourceName: String\n        var sourceID: UUID?\n        var iconURL: String?\n'''
+    if installed_source_fixed not in text:
+        text = replace_once(
+            text,
+            '''        var version: String\n        var sourceName: String\n        var iconURL: String?\n''',
+            installed_source_fixed,
+            "InstalledApp sourceID",
+        )
+
     pending_fixed = '''    struct PendingUpdate: Identifiable, Sendable {\n        let installed: InstalledApp\n        let app: AltApp\n        let sourceName: String\n        let sourceID: UUID\n        var id: String { installed.bundleIdentifier }\n    }\n'''
     if pending_fixed not in text:
         text = replace_once(
@@ -37,6 +46,42 @@ def fix_package(text: str) -> str:
             '''        do {\n            let catalog = try await Self.fetch(url)\n            let source = Source(url: normalised, name: catalog.name)\n            sources.append(source)\n            catalogs[source.id] = catalog\n            persistSources()\n''',
             add_source_fixed,
             "addSource effective URL",
+        )
+
+    exact_update_lookup = '''            guard hasReadyPayload(record.bundleIdentifier),\n                  let entry = catalogEntry(for: record),\n                  SemVer.isNewer(entry.app.latestVersion, than: record.version) else { return nil }\n'''
+    if exact_update_lookup not in text:
+        text = replace_once(
+            text,
+            '''            guard hasReadyPayload(record.bundleIdentifier),\n                  let entry = catalogIndex.entriesByBundle[record.bundleIdentifier],\n                  SemVer.isNewer(entry.app.latestVersion, than: record.version) else { return nil }\n''',
+            exact_update_lookup,
+            "exact installed-source update lookup",
+        )
+
+    catalog_lookup_helper = '''    private func catalogEntry(for record: InstalledApp) -> Entry? {\n        if let sourceID = record.sourceID,\n           let entry = catalogIndex.entriesBySource[sourceID]?.first(where: {\n               $0.app.bundleIdentifier == record.bundleIdentifier\n           }) {\n            return entry\n        }\n\n        // Existing records from builds before source IDs were persisted still\n        // prefer the source name they were installed from before falling back\n        // to the first repository that publishes the same bundle identifier.\n        if let entry = catalogIndex.allApps.first(where: {\n            $0.app.bundleIdentifier == record.bundleIdentifier\n                && $0.sourceName == record.sourceName\n        }) {\n            return entry\n        }\n        return catalogIndex.entriesByBundle[record.bundleIdentifier]\n    }\n\n'''
+    if "private func catalogEntry(for record: InstalledApp)" not in text:
+        text = replace_once(
+            text,
+            '''    private nonisolated static func entryNameOrder(_ lhs: Entry, _ rhs: Entry) -> Bool {\n''',
+            catalog_lookup_helper + '''    private nonisolated static func entryNameOrder(_ lhs: Entry, _ rhs: Entry) -> Bool {\n''',
+            "catalogEntry helper",
+        )
+
+    completed_record_fixed = '''            version: app.latestVersion,\n            sourceName: sourceName,\n            sourceID: sourceID,\n            iconURL: app.iconURL,\n'''
+    if completed_record_fixed not in text:
+        text = replace_once(
+            text,
+            '''            version: app.latestVersion,\n            sourceName: sourceName,\n            iconURL: app.iconURL,\n''',
+            completed_record_fixed,
+            "persist installed sourceID",
+        )
+
+    sideload_record_fixed = '''            version: version,\n            sourceName: sourceName,\n            sourceID: nil,\n            iconURL: iconURL,\n'''
+    if sideload_record_fixed not in text:
+        text = replace_once(
+            text,
+            '''            version: version,\n            sourceName: sourceName,\n            iconURL: iconURL,\n''',
+            sideload_record_fixed,
+            "sideload sourceID nil",
         )
     return text
 
@@ -139,6 +184,10 @@ zip_text = zip_archive.read_text()
 required = [
     (
         package_text,
+        "var sourceName: String\n        var sourceID: UUID?\n        var iconURL: String?",
+    ),
+    (
+        package_text,
         "struct PendingUpdate: Identifiable, Sendable {\n        let installed: InstalledApp\n        let app: AltApp\n        let sourceName: String\n        let sourceID: UUID",
     ),
     (
@@ -146,6 +195,9 @@ required = [
         "let (catalog, effectiveURL) = try await Self.fetch(url)\n            let source = Source(url: normalised, name: catalog.name)",
     ),
     (package_text, "effectiveSourceURLs[source.id] = effectiveURL"),
+    (package_text, "private func catalogEntry(for record: InstalledApp)"),
+    (package_text, "sourceID: sourceID,\n            iconURL: app.iconURL"),
+    (package_text, "sourceID: nil,\n            iconURL: iconURL"),
     (
         packages_view_text,
         "last: pending.id == store.updates.last?.id,\n                                action: store.action(\n                                    for: pending.app,\n                                    sourceName: pending.sourceName,\n                                    sourceID: pending.sourceID",

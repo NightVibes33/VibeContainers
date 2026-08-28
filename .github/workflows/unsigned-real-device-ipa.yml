@@ -43,6 +43,17 @@ jobs:
           python3 scripts/apply_ipad_gestures_v3.py
           python3 scripts/apply_virtual_host_lock.py
           python3 scripts/apply_ipad_gestures_v4.py
+          python3 scripts/apply_home_layout_persistence.py
+
+          # A restored custom layout must never be auto-packed back into Dock.
+          if grep -Fq 'if fillDockFromPages() { persist() }' iOSSim/Model/HomeLayoutStore.swift; then
+            echo "Launch-time Dock refill is still present" >&2
+            exit 1
+          fi
+          if grep -Fq '        fillDockFromPages()' iOSSim/Model/HomeLayoutStore.swift; then
+            echo "Guest-sync Dock refill is still present" >&2
+            exit 1
+          fi
 
       - name: Persist source fixes to main
         shell: bash
@@ -53,6 +64,7 @@ jobs:
             iOSSim/Model/PackageStore.swift
             iOSSim/Model/RunningContainerStore.swift
             iOSSim/Model/MultitaskPreferences.swift
+            iOSSim/Model/HomeLayoutStore.swift
             iOSSim/Apps/PackagesView.swift
             iOSSim/Apps/GuestContainerView.swift
             iOSSim/Model/ZipArchive.swift
@@ -72,7 +84,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "4189828+github-actions[bot]@users.noreply.github.com"
           git add -- "${FILES[@]}"
-          git commit -m "Harden Vibe bottom gesture action delivery [skip ci]"
+          git commit -m "Persist Vibe gestures and custom Home layout [skip ci]"
           git push origin HEAD:main
 
       - name: Show toolchain

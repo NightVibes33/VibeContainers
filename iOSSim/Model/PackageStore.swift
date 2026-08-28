@@ -50,6 +50,8 @@ final class PackageStore {
     private(set) var catalogs: [UUID: AltSource] = [:]
     var loading: Set<UUID> = []
     var failures: [UUID: String] = [:]
+    // The URL after HTTP redirects is the correct base for relative IPA URLs.
+    @ObservationIgnored private var effectiveSourceURLs: [UUID: URL] = [:]
 
     private var catalogIndex = CatalogIndex()
     private(set) var installedList: [InstalledApp] = []
@@ -298,7 +300,12 @@ final class PackageStore {
             guard hasReadyPayload(record.bundleIdentifier),
                   let entry = catalogIndex.entriesByBundle[record.bundleIdentifier],
                   SemVer.isNewer(entry.app.latestVersion, than: record.version) else { return nil }
-            return PendingUpdate(installed: record, app: entry.app, sourceName: entry.sourceName)
+            return PendingUpdate(
+                installed: record,
+                app: entry.app,
+                sourceName: entry.sourceName,
+                sourceID: entry.sourceID
+            )
         }
         updateBundleIdentifiers = Set(updates.map(\.installed.bundleIdentifier))
     }
@@ -350,11 +357,12 @@ final class PackageStore {
         defer { loading.remove(source.id) }
 
         do {
-            let catalog = try await Self.fetch(url)
+            let (catalog, effectiveURL) = try await Self.fetch(url)
             // The request may have outlived a source the user removed. Do not
             // retain a now-unreachable (and potentially enormous) catalogue.
             guard sources.contains(where: { $0.id == source.id }) else { return }
             catalogs[source.id] = catalog
+            effectiveSourceURLs[source.id] = effectiveURL
             // Adopt the catalogue's own name once we have it.
             if let index = sources.firstIndex(where: { $0.id == source.id }) {
                 sources[index].name = catalog.name
@@ -366,7 +374,9 @@ final class PackageStore {
         }
     }
 
-    private nonisolated static func fetch(_ url: URL) async throws -> AltSource {
+    private nonisolated static func fetch(
+        _ url: URL
+    ) async throws -> (catalog: AltSource, effectiveURL: URL) {
         var request = URLRequest(url: url)
         request.timeoutInterval = 20
         request.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -375,13 +385,15 @@ final class PackageStore {
         if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             throw StoreError.badStatus(http.statusCode)
         }
+        let catalog: AltSource
         do {
-            return try await Task.detached(priority: .userInitiated) {
+            catalog = try await Task.detached(priority: .userInitiated) {
                 try JSONDecoder().decode(AltSource.self, from: data)
             }.value
         } catch {
             throw StoreError.notASource
         }
+        return (catalog, response.url ?? url)
     }
 
     // MARK: - Sources
@@ -414,6 +426,7 @@ final class PackageStore {
         sources.removeAll { $0.id == source.id }
         catalogs[source.id] = nil
         failures[source.id] = nil
+        effectiveSourceURLs[source.id] = nil
         loading.remove(source.id)
         persistSources()
         scheduleCatalogIndexRebuild()
@@ -421,11 +434,21 @@ final class PackageStore {
 
     // MARK: - Installed cache
 
-    func install(_ app: AltApp, from sourceName: String) {
+    func install(_ app: AltApp, from sourceName: String, sourceID: UUID? = nil) {
         let bundleIdentifier = app.bundleIdentifier
         guard !pendingInstallBundles.contains(bundleIdentifier),
               !GuestInstaller.shared.isBusy(bundleIdentifier) else { return }
         pendingInstallBundles.insert(bundleIdentifier)
+
+        // Preserve the exact source chosen by the UI. Guessing later by bundle
+        // identifier/download string can select the wrong repository when the
+        // same app exists in more than one source. Prefer the final redirected
+        // catalogue URL because relative download URLs are based on that URL.
+        let sourceBaseURL: URL? = sourceID.flatMap { id in
+            if let effective = effectiveSourceURLs[id] { return effective }
+            guard let source = sources.first(where: { $0.id == id }) else { return nil }
+            return SourceURL.normalise(source.url)
+        }
 
         let completedRecord = InstalledApp(
             bundleIdentifier: bundleIdentifier,
@@ -450,7 +473,11 @@ final class PackageStore {
         // the IPA is still downloading or a failed partial Payload remains.
         Task {
             defer { pendingInstallBundles.remove(bundleIdentifier) }
-            let succeeded = await GuestInstaller.shared.install(app, into: container)
+            let succeeded = await GuestInstaller.shared.install(
+                app,
+                into: container,
+                sourceBaseURL: sourceBaseURL
+            )
             guard succeeded,
                   GuestInstaller.shared.phase(for: bundleIdentifier) == .ready,
                   hasReadyPayload(bundleIdentifier) else { return }
@@ -502,7 +529,7 @@ final class PackageStore {
     /// Bumps the recorded version — the same bookkeeping a real update does
     /// once the download has landed.
     func update(_ update: PendingUpdate) {
-        install(update.app, from: update.sourceName)
+        install(update.app, from: update.sourceName, sourceID: update.sourceID)
     }
 
     func remove(_ bundleIdentifier: String) {

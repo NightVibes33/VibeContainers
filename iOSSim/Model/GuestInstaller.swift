@@ -158,8 +158,17 @@ final class GuestInstaller {
     private init() {
         // A killed/terminated import can leave a full extracted app in Staging.
         // Nothing in this directory is persistent state, so reclaim it before
-        // the next install instead of letting abandoned imports exhaust /User.
+        // the next install instead of letting abandoned imports consume space.
         try? FileManager.default.removeItem(at: Self.stagingRoot)
+
+        // Source installs stage inside each app container so the final rename is
+        // guaranteed to stay on one filesystem. Reclaim only transactions that
+        // carry our active marker; recovery copies are explicitly protected.
+        for container in GuestContainerStore.shared.containers.values {
+            Self.cleanupAbandonedTransactions(
+                in: GuestContainerStore.shared.url(for: container)
+            )
+        }
     }
 
     enum Phase: Equatable {
@@ -204,18 +213,23 @@ final class GuestInstaller {
     // MARK: - Install
 
     @discardableResult
-    func install(_ app: AltApp, into container: GuestContainerStore.Container) async -> Bool {
+    func install(
+        _ app: AltApp,
+        into container: GuestContainerStore.Container,
+        sourceBaseURL: URL? = nil
+    ) async -> Bool {
         let bundle = container.bundleIdentifier
         guard activeInstalls.insert(bundle).inserted else { return false }
         defer { activeInstalls.remove(bundle) }
 
         guard let raw = app.latest?.downloadURL,
-              let url = Self.resolveDownloadURL(raw, for: app) else {
+              let url = Self.resolveDownloadURL(raw, relativeTo: sourceBaseURL) else {
             phases[bundle] = .failed("This version has no usable download URL.")
             return false
         }
 
         let base = GuestContainerStore.shared.url(for: container)
+        Self.cleanupAbandonedTransactions(in: base)
         let transactionRoot = base
             .appendingPathComponent(".install-\(UUID().uuidString)", isDirectory: true)
         let payloadDir = transactionRoot.appendingPathComponent("Payload", isDirectory: true)
@@ -231,6 +245,10 @@ final class GuestInstaller {
             try FileManager.default.createDirectory(
                 at: transactionRoot,
                 withIntermediateDirectories: true
+            )
+            FileManager.default.createFile(
+                atPath: transactionRoot.appendingPathComponent(Self.activeTransactionMarker).path,
+                contents: Data()
             )
             phases[bundle] = .downloading(0)
             try await download(url, to: ipaURL) { progress in
@@ -258,6 +276,9 @@ final class GuestInstaller {
             // previous payload. Leave its transaction directory in place for
             // recovery and report its exact location in the failure message.
             preserveTransactionForRecovery = error.preserveStaging
+            if preserveTransactionForRecovery {
+                Self.markRecoveryTransaction(transactionRoot)
+            }
             phases[bundle] = .failed(error.localizedDescription)
             return false
         } catch {
@@ -435,24 +456,50 @@ final class GuestInstaller {
             .appendingPathComponent("Staging", isDirectory: true)
     }
 
-    /// Resolves the forms found in real AltStore-compatible sources: absolute
-    /// URLs, scheme-relative URLs, paths relative to the source JSON, and GitHub
-    /// `blob` links that otherwise download an HTML page instead of an IPA.
-    private static func resolveDownloadURL(_ raw: String, for app: AltApp) -> URL? {
+    private static let activeTransactionMarker = ".vibe-install-active"
+    private static let recoveryTransactionMarker = ".vibe-install-recovery"
+
+    /// A normal process death skips Swift `defer`, so unfinished source installs
+    /// can otherwise leave a downloaded IPA plus a partially expanded Payload.
+    /// Only directories carrying our explicit active marker are reclaimed. A
+    /// transaction containing the previous version after a rollback failure is
+    /// protected by a recovery marker and is never auto-deleted.
+    private static func cleanupAbandonedTransactions(in base: URL) {
+        let manager = FileManager.default
+        guard let children = try? manager.contentsOfDirectory(
+            at: base,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        for child in children where child.lastPathComponent.hasPrefix(".install-") {
+            let active = child.appendingPathComponent(activeTransactionMarker)
+            let recovery = child.appendingPathComponent(recoveryTransactionMarker)
+            guard manager.fileExists(atPath: active.path),
+                  !manager.fileExists(atPath: recovery.path) else { continue }
+            try? manager.removeItem(at: child)
+        }
+    }
+
+    private static func markRecoveryTransaction(_ transaction: URL) {
+        let manager = FileManager.default
+        let marker = transaction.appendingPathComponent(recoveryTransactionMarker)
+        if !manager.createFile(atPath: marker.path, contents: Data()) {
+            // If the disk is so full that the protection marker cannot be made,
+            // remove the active marker. Cleanup only targets active transactions,
+            // so the recovery payload remains preserved across the next launch.
+            try? manager.removeItem(
+                at: transaction.appendingPathComponent(activeTransactionMarker)
+            )
+        }
+    }
+
+    /// Resolves absolute, scheme-relative and source-relative IPA URLs. The
+    /// caller supplies the exact source URL that produced this catalogue entry;
+    /// no bundle-ID scan or repository guessing occurs here.
+    private static func resolveDownloadURL(_ raw: String, relativeTo sourceBase: URL?) -> URL? {
         let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return nil }
-
-        var sourceBase: URL?
-        for source in PackageStore.shared.sources {
-            let matches = PackageStore.shared.apps(for: source).contains { candidate in
-                candidate.bundleIdentifier == app.bundleIdentifier
-                    && candidate.latest?.downloadURL == raw
-            }
-            if matches {
-                sourceBase = SourceURL.normalise(source.url)
-                break
-            }
-        }
 
         let candidate: URL?
         if value.hasPrefix("//") {
@@ -469,6 +516,8 @@ final class GuestInstaller {
               let scheme = resolved.scheme?.lowercased(),
               scheme == "https" || scheme == "http" else { return nil }
 
+        // A copied GitHub file-page URL serves HTML. Convert only the canonical
+        // /blob/<ref>/ form; release/download and other direct URLs stay intact.
         if resolved.host?.lowercased() == "github.com" {
             var parts = resolved.path.split(separator: "/").map(String.init)
             if let blob = parts.firstIndex(of: "blob"), parts.count > blob + 1 {

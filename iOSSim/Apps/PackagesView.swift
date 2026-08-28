@@ -213,7 +213,8 @@ private struct HomeTab: View {
                         last: index == store.updates.count - 1,
                         action: store.action(
                             for: pending.app,
-                            sourceName: pending.sourceName
+                            sourceName: pending.sourceName,
+                            sourceID: pending.sourceID
                         )
                     )
                 }
@@ -1577,10 +1578,14 @@ private actor PackageIconPipeline {
 
 extension PackageStore {
     func action(for entry: Entry) -> AppRow.Action {
-        action(for: entry.app, sourceName: entry.sourceName)
+        action(for: entry.app, sourceName: entry.sourceName, sourceID: entry.sourceID)
     }
 
-    func action(for app: AltApp, sourceName: String) -> AppRow.Action {
+    func action(
+        for app: AltApp,
+        sourceName: String,
+        sourceID: UUID? = nil
+    ) -> AppRow.Action {
         let bundleIdentifier = app.bundleIdentifier
         let phase = GuestInstaller.shared.phase(for: bundleIdentifier)
 
@@ -1605,13 +1610,15 @@ extension PackageStore {
         case .preparing:
             return .installing("PREPARING", progress: nil)
         case .failed:
-            return .retry { self.install(app, from: sourceName) }
+            return .retry { self.install(app, from: sourceName, sourceID: sourceID) }
         case .idle, .ready:
             break
         }
 
-        if hasUpdate(app) { return .update { self.install(app, from: sourceName) } }
+        if hasUpdate(app) {
+            return .update { self.install(app, from: sourceName, sourceID: sourceID) }
+        }
         if isInstalled(app) { return .open }
-        return .get { self.install(app, from: sourceName) }
+        return .get { self.install(app, from: sourceName, sourceID: sourceID) }
     }
 }

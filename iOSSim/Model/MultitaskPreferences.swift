@@ -29,5 +29,17 @@ enum MultitaskPreferences {
             "LCHideCollapsedDock": false,
             "LCMaxOneAppOnStage": false
         ])
+
+        // register(defaults:) does not override a value saved by an older
+        // LiveContainer/VibeContainers build. Mode 1 launches a separate native
+        // UIWindowScene and therefore cannot be controlled by Vibe's host-owned
+        // bottom edge. Migrate it on every host start; LCUtils also enforces the
+        // same invariant immediately before each guest launch.
+        let savedMode = sharedDefaults.integer(forKey: "LCMultitaskMode")
+        if savedMode != 0 {
+            NSLog("VibeContainers: migrating saved multitask mode %d to virtual host", savedMode)
+        }
+        sharedDefaults.set(0, forKey: "LCMultitaskMode")
+        UserDefaults.standard.set(true, forKey: "LCLaunchMultitaskMaximized")
     }
 }

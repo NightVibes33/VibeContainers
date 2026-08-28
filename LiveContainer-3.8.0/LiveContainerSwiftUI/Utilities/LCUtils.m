@@ -80,15 +80,20 @@
     }
     
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (@available(iOS 16.1, *)) {
-            if(UIApplication.sharedApplication.supportsMultipleScenes && [NSUserDefaults.lcSharedDefaults integerForKey:@"LCMultitaskMode"] == 1) {
-                [MultitaskWindowManager openAppWindowWithDisplayName:displayName dataUUID:dataUUID bundleId:bundleId pidCallback:completionHandler];
-                MultitaskDockManager *dock = [MultitaskDockManager shared];
-                [dock addRunningApp:displayName appUUID:dataUUID view:nil];
-                return;
-            }
+        // VibeContainers' Home/Dock/switcher contract requires the guest to
+        // stay inside the host window hierarchy. A saved upstream LiveContainer
+        // native-window preference (mode 1) creates a separate UIWindowScene,
+        // which bypasses every host-owned bottom gesture and preserves the old
+        // controls. Migrate that state here at the final launch decision so an
+        // existing installation cannot silently select the incompatible path.
+        NSUserDefaults *sharedDefaults = NSUserDefaults.lcSharedDefaults;
+        NSInteger savedMode = [sharedDefaults integerForKey:@"LCMultitaskMode"];
+        if (savedMode != 0) {
+            [sharedDefaults setInteger:0 forKey:@"LCMultitaskMode"];
+            [sharedDefaults synchronize];
         }
-        
+        NSLog(@"VibeContainers: FORCED virtual-window guest host (saved mode=%ld)", (long)savedMode);
+
         MultitaskDockManager *dock = MultitaskDockManager.shared;
         UIWindow *hostWindow = [dock prepareHostWindowForGuestLaunch];
         UIViewController *rootVC = hostWindow.rootViewController;

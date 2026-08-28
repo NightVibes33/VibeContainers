@@ -505,7 +505,7 @@ private final class GuestSpringboardControlPassthroughView: UIView, UIGestureRec
         return point.y >= bounds.height - bottomHitHeight
     }
 
-    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+    override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         guard gestureRecognizer === bottomPan else { return true }
         let start = gestureRecognizer.location(in: self)
         guard start.y >= bounds.height - bottomHitHeight else { return false }

@@ -1,3 +1,4 @@
+# Diagnostics are uploaded on every attempt so failed device builds are actionable.
 name: Unsigned Real Device IPA
 
 on:

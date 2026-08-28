@@ -43,6 +43,7 @@ jobs:
           python3 scripts/apply_ipad_gestures_v3.py
           python3 scripts/apply_virtual_host_lock.py
           python3 scripts/apply_ipad_gestures_v4.py
+          python3 scripts/apply_ipad_gestures_v5.py
           python3 scripts/apply_home_layout_persistence.py
 
           # A restored custom layout must never be auto-packed back into Dock.
@@ -84,7 +85,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "4189828+github-actions[bot]@users.noreply.github.com"
           git add -- "${FILES[@]}"
-          git commit -m "Persist Vibe gestures and custom Home layout [skip ci]"
+          git commit -m "Persist Vibe gesture v5 and custom Home layout [skip ci]"
           git push origin HEAD:main
 
       - name: Show toolchain
@@ -171,7 +172,8 @@ jobs:
           strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: rebound guest UIView'
           strings "$LC_FRAMEWORK" | grep -F 'bottom gesture cancelled by UIKit; committing last translation'
           strings "$LC_FRAMEWORK" | grep -F 'hiding guest surfaces registered='
-          strings "$LC_FRAMEWORK" | grep -F 'Dock action could not create hosting controller'
+          strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: Dock hosting controller ready'
+          strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: Home gesture committed immediately'
           strings "$BIN" | grep -F 'VibeContainers: migrating saved multitask mode'
           if strings "$LC_FRAMEWORK" | grep -E 'multitaskSwipeGesture|handleMultitaskSwipeGesture|minimumNumberOfTouches = 4|maximumNumberOfTouches = 5|MagnificationGesture' >/dev/null; then
             echo "Forbidden multi-finger/pinch gesture implementation found in shipped framework" >&2

@@ -57,13 +57,21 @@ def fix_package(text: str) -> str:
             "exact installed-source update lookup",
         )
 
-    catalog_lookup_helper = '''    private func catalogEntry(for record: InstalledApp) -> Entry? {\n        if let sourceID = record.sourceID,\n           let entry = catalogIndex.entriesBySource[sourceID]?.first(where: {\n               $0.app.bundleIdentifier == record.bundleIdentifier\n           }) {\n            return entry\n        }\n\n        // Existing records from builds before source IDs were persisted still\n        // prefer the source name they were installed from before falling back\n        // to the first repository that publishes the same bundle identifier.\n        if let entry = catalogIndex.allApps.first(where: {\n            $0.app.bundleIdentifier == record.bundleIdentifier\n                && $0.sourceName == record.sourceName\n        }) {\n            return entry\n        }\n        return catalogIndex.entriesByBundle[record.bundleIdentifier]\n    }\n\n'''
-    if "private func catalogEntry(for record: InstalledApp)" not in text:
+    catalog_lookup_helper = '''    func catalogEntry(for record: InstalledApp) -> Entry? {\n        if let sourceID = record.sourceID,\n           let entry = catalogIndex.entriesBySource[sourceID]?.first(where: {\n               $0.app.bundleIdentifier == record.bundleIdentifier\n           }) {\n            return entry\n        }\n\n        // Existing records from builds before source IDs were persisted still\n        // prefer the source name they were installed from before falling back\n        // to the first repository that publishes the same bundle identifier.\n        if let entry = catalogIndex.allApps.first(where: {\n            $0.app.bundleIdentifier == record.bundleIdentifier\n                && $0.sourceName == record.sourceName\n        }) {\n            return entry\n        }\n        return catalogIndex.entriesByBundle[record.bundleIdentifier]\n    }\n\n'''
+    if "func catalogEntry(for record: InstalledApp)" not in text:
         text = replace_once(
             text,
             '''    private nonisolated static func entryNameOrder(_ lhs: Entry, _ rhs: Entry) -> Bool {\n''',
             catalog_lookup_helper + '''    private nonisolated static func entryNameOrder(_ lhs: Entry, _ rhs: Entry) -> Bool {\n''',
             "catalogEntry helper",
+        )
+    elif "private func catalogEntry(for record: InstalledApp)" in text:
+        # GuestContainerView also needs this exact lookup for a missing-payload
+        # recovery install. Keep the helper actor-isolated but module-visible.
+        text = text.replace(
+            "    private func catalogEntry(for record: InstalledApp) -> Entry? {",
+            "    func catalogEntry(for record: InstalledApp) -> Entry? {",
+            1,
         )
 
     completed_record_fixed = '''            version: app.latestVersion,\n            sourceName: sourceName,\n            sourceID: sourceID,\n            iconURL: app.iconURL,\n'''
@@ -94,6 +102,18 @@ def fix_packages_view(text: str) -> str:
             '''                                last: pending.id == store.updates.last?.id,\n                                action: store.action(\n                                    for: pending.app,\n                                    sourceName: pending.sourceName\n                                )\n''',
             installed_update_fixed,
             "Installed updates sourceID",
+        )
+    return text
+
+
+def fix_guest_container(text: str) -> str:
+    fixed = '''        } else {\n            guard let record, let entry = store.catalogEntry(for: record) else {\n                report = GuestInstaller.LaunchOutcome(\n                    ok: false, headline: "Not in a loaded source",\n                    detail: "Refresh the source this app came from, or install its .ipa again from ★ Applications."\n                )\n                return\n            }\n            report = nil\n            store.install(entry.app, from: entry.sourceName, sourceID: entry.sourceID)\n        }\n    }\n'''
+    if fixed not in text:
+        text = replace_once(
+            text,
+            '''        } else {\n            guard let container, let app = appFromCatalog() else {\n                report = GuestInstaller.LaunchOutcome(\n                    ok: false, headline: "Not in a loaded source",\n                    detail: "Refresh the source this app came from, or install its .ipa again from ★ Applications."\n                )\n                return\n            }\n            report = nil\n            Task { await installer.install(app, into: container) }\n        }\n    }\n\n    /// The live `AltApp` for this bundle, needed for its download URL.\n    private func appFromCatalog() -> AltApp? {\n        store.entry(bundleIdentifier: bundleIdentifier)?.app\n    }\n''',
+            fixed,
+            "container recovery exact source",
         )
     return text
 
@@ -168,16 +188,19 @@ def fix_zip(text: str) -> str:
 
 package = ROOT / "iOSSim/Model/PackageStore.swift"
 packages_view = ROOT / "iOSSim/Apps/PackagesView.swift"
+guest_container = ROOT / "iOSSim/Apps/GuestContainerView.swift"
 guest = ROOT / "iOSSim/Model/GuestInstaller.swift"
 zip_archive = ROOT / "iOSSim/Model/ZipArchive.swift"
 
 update(package, fix_package)
 update(packages_view, fix_packages_view)
+update(guest_container, fix_guest_container)
 update(guest, fix_guest)
 update(zip_archive, fix_zip)
 
 package_text = package.read_text()
 packages_view_text = packages_view.read_text()
+guest_container_text = guest_container.read_text()
 guest_text = guest.read_text()
 zip_text = zip_archive.read_text()
 
@@ -195,12 +218,20 @@ required = [
         "let (catalog, effectiveURL) = try await Self.fetch(url)\n            let source = Source(url: normalised, name: catalog.name)",
     ),
     (package_text, "effectiveSourceURLs[source.id] = effectiveURL"),
-    (package_text, "private func catalogEntry(for record: InstalledApp)"),
+    (package_text, "func catalogEntry(for record: InstalledApp)"),
     (package_text, "sourceID: sourceID,\n            iconURL: app.iconURL"),
     (package_text, "sourceID: nil,\n            iconURL: iconURL"),
     (
         packages_view_text,
         "last: pending.id == store.updates.last?.id,\n                                action: store.action(\n                                    for: pending.app,\n                                    sourceName: pending.sourceName,\n                                    sourceID: pending.sourceID",
+    ),
+    (
+        guest_container_text,
+        "guard let record, let entry = store.catalogEntry(for: record)",
+    ),
+    (
+        guest_container_text,
+        "store.install(entry.app, from: entry.sourceName, sourceID: entry.sourceID)",
     ),
     (guest_text, "includingPropertiesForKeys: [.isDirectoryKey],\n            options: []"),
     (guest_text, "to: transactionRoot.appendingPathComponent(Self.activeTransactionMarker)"),

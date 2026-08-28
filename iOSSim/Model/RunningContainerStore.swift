@@ -21,6 +21,13 @@ private func IOSSimShowMultitaskDock() -> Int32
 @_silgen_name("IOSSimCycleMultitaskGuest")
 private func IOSSimCycleMultitaskGuest(_ dataUUID: UnsafePointer<CChar>?, _ direction: Int32) -> Int32
 
+
+@_silgen_name("IOSSimPresentMultitaskSwitcherLikeSpringboard")
+private func IOSSimPresentMultitaskSwitcherLikeSpringboard() -> Int32
+
+@_silgen_name("IOSSimCycleMultitaskGuestLikeSpringboard")
+private func IOSSimCycleMultitaskGuestLikeSpringboard(_ direction: Int32) -> Int32
+
 /// The host-side view of LiveContainer's independently running guest scenes.
 ///
 /// LiveContainer remains the source of truth for the actual UIKit scenes. This
@@ -67,6 +74,8 @@ final class RunningContainerStore: NSObject {
     /// scene. Hide accepted cards immediately, but keep their lifecycle entry
     /// until LiveContainer posts the authoritative close notification.
     private var terminatingEntryIDs: Set<String> = []
+    /// Hosts the exact AppWindow bottom-control modifier above a real guest.
+    private let guestSpringboardControlHost = GuestSpringboardControlHost()
 
     var activeEntries: [Entry] {
         entries
@@ -116,6 +125,12 @@ final class RunningContainerStore: NSObject {
             self,
             selector: #selector(showSwitcher(_:)),
             name: .iOSSimShowContainerSwitcher,
+            object: nil
+        )
+        center.addObserver(
+            self,
+            selector: #selector(guestSpringboardControlVisibility(_:)),
+            name: .iOSSimGuestSpringboardControlVisibility,
             object: nil
         )
     }
@@ -256,6 +271,39 @@ final class RunningContainerStore: NSObject {
 
     func dismissSwitcher() {
         isSwitcherPresented = false
+    }
+
+    @objc private func guestSpringboardControlVisibility(_ notification: Notification) {
+        let visible = notification.userInfo?["visible"] as? Bool ?? false
+        guard visible else {
+            guestSpringboardControlHost.hide()
+            return
+        }
+        guard let window = notification.userInfo?["window"] as? UIWindow else { return }
+
+        guestSpringboardControlHost.show(
+            in: window,
+            canOpenSwitcher: !visibleEntries.isEmpty,
+            onHome: { [weak self] in
+                guard let self else { return }
+                self.guestSpringboardControlHost.hide()
+                _ = self.returnToVibeHome()
+            },
+            onSwitcher: { [weak self] in
+                guard let self else { return }
+                self.guestSpringboardControlHost.hide()
+                _ = IOSSimPresentMultitaskSwitcherLikeSpringboard()
+            },
+            onDock: { [weak self] in
+                guard let self else { return }
+                _ = self.showGestureDock()
+            },
+            onCycle: { [weak self] direction in
+                guard let self else { return }
+                self.guestSpringboardControlHost.hide()
+                _ = IOSSimCycleMultitaskGuestLikeSpringboard(direction)
+            }
+        )
     }
 
     // MARK: - Runtime lifecycle
@@ -405,10 +453,117 @@ final class RunningContainerStore: NSObject {
     }
 }
 
+/// Full-screen host that deliberately passes every touch except the bottom
+/// 70pt through to the LiveContainer guest underneath it.
+private final class GuestSpringboardControlPassthroughView: UIView {
+    var bottomHitHeight: CGFloat = 70
+
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        guard super.point(inside: point, with: event) else { return false }
+        return point.y >= bounds.height - bottomHitHeight
+    }
+}
+
+@MainActor
+private final class GuestSpringboardControlHost {
+    private var containerView: GuestSpringboardControlPassthroughView?
+    private var hostingController: UIHostingController<AnyView>?
+
+    func show(
+        in window: UIWindow,
+        canOpenSwitcher: Bool,
+        onHome: @escaping () -> Void,
+        onSwitcher: @escaping () -> Void,
+        onDock: @escaping () -> Void,
+        onCycle: @escaping (Int32) -> Void
+    ) {
+        guard let rootViewController = window.rootViewController else { return }
+        let rootView = rootViewController.view!
+        let bounds = rootView.bounds
+
+        let container: GuestSpringboardControlPassthroughView
+        if let existing = containerView {
+            container = existing
+        } else {
+            container = GuestSpringboardControlPassthroughView(frame: bounds)
+            container.backgroundColor = .clear
+            container.isOpaque = false
+            container.bottomHitHeight = 70
+            container.accessibilityIdentifier = "VibeContainers.ExactAppWindowGuestControlHost"
+            containerView = container
+        }
+        container.frame = bounds
+        container.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        container.isHidden = false
+        container.isUserInteractionEnabled = true
+
+        if container.superview !== rootView {
+            container.removeFromSuperview()
+            rootView.addSubview(container)
+        }
+
+        let control = AnyView(
+            Color.clear
+                .frame(width: bounds.width, height: bounds.height)
+                .ignoresSafeArea()
+                .modifier(
+                    SpringboardBottomControlModifier(
+                        screenHeight: bounds.height,
+                        bottomInset: window.safeAreaInsets.bottom,
+                        enabled: true,
+                        canOpenSwitcher: canOpenSwitcher,
+                        motionDisabled: UIAccessibility.isReduceMotionEnabled || Appearance.shared.reduceMotion,
+                        onProgress: { _ in },
+                        onSettle: {},
+                        onHome: onHome,
+                        onSwitcher: onSwitcher,
+                        onDock: onDock,
+                        onCycle: onCycle
+                    )
+                )
+        )
+
+        let controller: UIHostingController<AnyView>
+        if let existing = hostingController {
+            controller = existing
+            controller.rootView = control
+            if controller.parent !== rootViewController {
+                controller.willMove(toParent: nil)
+                controller.view.removeFromSuperview()
+                controller.removeFromParent()
+                rootViewController.addChild(controller)
+                container.addSubview(controller.view)
+                controller.didMove(toParent: rootViewController)
+            } else if controller.view.superview !== container {
+                controller.view.removeFromSuperview()
+                container.addSubview(controller.view)
+            }
+        } else {
+            controller = UIHostingController(rootView: control)
+            controller.view.backgroundColor = .clear
+            controller.view.isOpaque = false
+            rootViewController.addChild(controller)
+            container.addSubview(controller.view)
+            controller.didMove(toParent: rootViewController)
+            hostingController = controller
+        }
+
+        controller.view.frame = container.bounds
+        controller.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        rootView.bringSubviewToFront(container)
+        NSLog("VibeContainers: exact AppWindow Springboard control hosted full-screen")
+    }
+
+    func hide() {
+        containerView?.isHidden = true
+    }
+}
+
 extension Notification.Name {
     static let iOSSimMultitaskGuestDidOpen = Notification.Name("IOSSimMultitaskGuestDidOpen")
     static let iOSSimMultitaskGuestDidBecomeReady = Notification.Name("IOSSimMultitaskGuestDidBecomeReady")
     static let iOSSimMultitaskGuestDidFail = Notification.Name("IOSSimMultitaskGuestDidFail")
     static let iOSSimMultitaskGuestDidClose = Notification.Name("IOSSimMultitaskGuestDidClose")
     static let iOSSimShowContainerSwitcher = Notification.Name("IOSSimShowContainerSwitcher")
+    static let iOSSimGuestSpringboardControlVisibility = Notification.Name("IOSSimGuestSpringboardControlVisibility")
 }

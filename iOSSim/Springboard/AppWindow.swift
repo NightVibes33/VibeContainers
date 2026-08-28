@@ -1,5 +1,121 @@
 import SwiftUI
 
+// MARK: - Shared Springboard bottom control
+// This is the single source of truth for the bottom bar and its gesture state
+// machine. AppWindow uses this modifier directly, and real LiveContainer guests
+// host this same modifier full-screen from RunningContainerStore.
+struct SpringboardBottomControlModifier: ViewModifier {
+    let screenHeight: CGFloat
+    let bottomInset: CGFloat
+    let enabled: Bool
+    let canOpenSwitcher: Bool
+    let motionDisabled: Bool
+    let onProgress: (CGFloat) -> Void
+    let onSettle: () -> Void
+    let onHome: () -> Void
+    let onSwitcher: () -> Void
+    let onDock: () -> Void
+    let onCycle: (Int32) -> Void
+
+    @State private var gestureAxis: Axis?
+    @State private var gestureStart: CGPoint?
+    @State private var gestureBeganAt: TimeInterval = 0
+
+    func body(content: Content) -> some View {
+        content
+            .overlay(alignment: .bottom) {
+                if enabled {
+                    Capsule()
+                        .fill(SysColor.label.opacity(0.78))
+                        .frame(width: 122, height: 5)
+                        .padding(.bottom, max(7, bottomInset > 0 ? 7 : 11))
+                        .allowsHitTesting(false)
+                }
+            }
+            .allowsHitTesting(enabled)
+            .simultaneousGesture(bottomGesture)
+    }
+
+    private var bottomGesture: some Gesture {
+        DragGesture(minimumDistance: 12, coordinateSpace: .global)
+            .onChanged(updateGesture)
+            .onEnded { value in
+                let axis = gestureAxis
+                let elapsed = max(0, Date.timeIntervalSinceReferenceDate - gestureBeganAt)
+                gestureAxis = nil
+                gestureStart = nil
+                gestureBeganAt = 0
+
+                guard enabled else { return }
+                guard value.startLocation.y > screenHeight - 70 else {
+                    onSettle()
+                    return
+                }
+
+                if axis == .horizontal {
+                    let horizontal = abs(value.translation.width)
+                    guard horizontal > 48 else {
+                        onSettle()
+                        return
+                    }
+                    onCycle(value.translation.width < 0 ? 1 : -1)
+                    return
+                }
+
+                guard axis == .vertical else {
+                    onSettle()
+                    return
+                }
+
+                let upwardTravel = max(0, -value.translation.height)
+                let predictedUpwardTravel = max(upwardTravel, -value.predictedEndTranslation.height)
+
+                if elapsed >= 0.34, upwardTravel >= 28, upwardTravel < 165,
+                   canOpenSwitcher {
+                    onSwitcher()
+                } else if upwardTravel >= 64 || predictedUpwardTravel >= 150 {
+                    onHome()
+                } else if upwardTravel >= 12 {
+                    onDock()
+                    onSettle()
+                } else {
+                    onSettle()
+                }
+            }
+    }
+
+    private func updateGesture(_ value: DragGesture.Value) {
+        guard enabled,
+              value.startLocation.y > screenHeight - 70 else { return }
+
+        if gestureStart != value.startLocation {
+            gestureStart = value.startLocation
+            gestureAxis = nil
+            gestureBeganAt = Date.timeIntervalSinceReferenceDate
+        }
+
+        let horizontalTravel = abs(value.translation.width)
+        let upwardTravel = max(0, -value.translation.height)
+        if gestureAxis == nil {
+            guard max(horizontalTravel, abs(value.translation.height)) >= 10 else { return }
+            if value.translation.height < 0,
+               upwardTravel > horizontalTravel * 1.15 {
+                gestureAxis = .vertical
+            } else {
+                gestureAxis = .horizontal
+            }
+        }
+
+        guard gestureAxis == .vertical, !motionDisabled else {
+            onProgress(0)
+            return
+        }
+
+        let interactiveTravel = max(120, min(220, screenHeight * 0.20))
+        onProgress(min(1, upwardTravel / interactiveTravel))
+    }
+}
+
 /// Presents an app through a circular reveal centered on its source icon. The
 /// app remains laid out at full size behind the reveal, so no intermediate
 /// frame can squash its interface or resemble a page flip.
@@ -17,13 +133,6 @@ struct AppWindow: View {
     /// sitting full-screen and scrolling normally.
     let transitionActive: Bool
     let onClose: () -> Void
-
-    /// `.vertical` means this drag owns the home gesture; `.horizontal` is a
-    /// locked rejection, preventing a diagonal drag from becoming a close at
-    /// touch-up merely because its final predicted Y velocity is large.
-    @State private var closeGestureAxis: Axis?
-    @State private var closeGestureStart: CGPoint?
-    @State private var closeGestureBeganAt: TimeInterval = 0
 
     @Environment(\.deviceSafeArea) private var safeArea
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
@@ -89,17 +198,21 @@ struct AppWindow: View {
         // Reduce Motion keeps the surface full-screen and cross-fades it as a
         // unit; normal motion keeps the background opaque during the morph.
         .opacity(motionDisabled ? (revealed ? 1 : 0) : 1)
-        .overlay(alignment: .bottom) {
-            if revealed && !transitionActive {
-                Capsule()
-                    .fill(SysColor.label.opacity(0.78))
-                    .frame(width: 122, height: 5)
-                    .padding(.bottom, max(7, safeArea.bottom > 0 ? 7 : 11))
-                    .allowsHitTesting(false)
-            }
-        }
-        .allowsHitTesting(revealed && !transitionActive)
-        .simultaneousGesture(closeGesture)
+        .modifier(
+            SpringboardBottomControlModifier(
+                screenHeight: screen.height,
+                bottomInset: safeArea.bottom,
+                enabled: revealed && !transitionActive,
+                canOpenSwitcher: !runningContainers.visibleEntries.isEmpty,
+                motionDisabled: motionDisabled,
+                onProgress: { dismissalProgress = $0 },
+                onSettle: settleDismissal,
+                onHome: onClose,
+                onSwitcher: openContainerSwitcher,
+                onDock: { _ = runningContainers.showGestureDock() },
+                onCycle: switchToRunningContainer
+            )
+        )
     }
 
     /// Clamp stale frames after rotation or search dismissal to the current
@@ -146,90 +259,6 @@ struct AppWindow: View {
                 size: size
             )
         }
-    }
-
-    /// iPad-style bottom gestures: short swipe = Dock, quick swipe = Home,
-    /// swipe-and-hold = app switcher, horizontal = adjacent running app.
-    private var closeGesture: some Gesture {
-        DragGesture(minimumDistance: 12, coordinateSpace: .global)
-            .onChanged(updateCloseGesture)
-            .onEnded { value in
-                let axis = closeGestureAxis
-                let elapsed = max(0, Date.timeIntervalSinceReferenceDate - closeGestureBeganAt)
-                closeGestureAxis = nil
-                closeGestureStart = nil
-                closeGestureBeganAt = 0
-
-                guard value.startLocation.y > screen.height - 70 else {
-                    settleDismissal()
-                    return
-                }
-
-                if axis == .horizontal {
-                    let horizontal = abs(value.translation.width)
-                    guard horizontal > 48 else {
-                        settleDismissal()
-                        return
-                    }
-                    switchToRunningContainer(direction: value.translation.width < 0 ? 1 : -1)
-                    return
-                }
-
-                guard axis == .vertical else {
-                    settleDismissal()
-                    return
-                }
-
-                let upwardTravel = max(0, -value.translation.height)
-                let predictedUpwardTravel = max(upwardTravel, -value.predictedEndTranslation.height)
-
-                if elapsed >= 0.34, upwardTravel >= 28, upwardTravel < 165,
-                   !runningContainers.visibleEntries.isEmpty {
-                    openContainerSwitcher()
-                } else if upwardTravel >= 64 || predictedUpwardTravel >= 150 {
-                    onClose()
-                } else if upwardTravel >= 12 {
-                    _ = runningContainers.showGestureDock()
-                    settleDismissal()
-                } else {
-                    settleDismissal()
-                }
-            }
-    }
-
-    private func updateCloseGesture(_ value: DragGesture.Value) {
-        guard revealed, !transitionActive,
-              value.startLocation.y > screen.height - 70 else { return }
-
-        if closeGestureStart != value.startLocation {
-            closeGestureStart = value.startLocation
-            closeGestureAxis = nil
-            closeGestureBeganAt = Date.timeIntervalSinceReferenceDate
-        }
-
-        let horizontalTravel = abs(value.translation.width)
-        let upwardTravel = max(0, -value.translation.height)
-        if closeGestureAxis == nil {
-            guard max(horizontalTravel, abs(value.translation.height)) >= 10 else { return }
-            if value.translation.height < 0,
-               upwardTravel > horizontalTravel * 1.15 {
-                closeGestureAxis = .vertical
-            } else {
-                closeGestureAxis = .horizontal
-            }
-        }
-
-        guard closeGestureAxis == .vertical else {
-            dismissalProgress = 0
-            return
-        }
-        guard !motionDisabled else {
-            dismissalProgress = 0
-            return
-        }
-
-        let interactiveTravel = max(120, min(220, screen.height * 0.20))
-        dismissalProgress = min(1, upwardTravel / interactiveTravel)
     }
 
     private func openContainerSwitcher() {

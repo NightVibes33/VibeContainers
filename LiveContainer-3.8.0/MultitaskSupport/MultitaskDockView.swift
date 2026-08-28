@@ -125,97 +125,6 @@ class AppInfoProvider {
     }
 }
 
-// MARK: - Shared Springboard-style guest bottom control
-@available(iOS 16.0, *)
-private struct GuestSpringboardBottomControl: View {
-    let screenHeight: CGFloat
-    let onHome: () -> Void
-    let onSwitcher: () -> Void
-    let onDock: () -> Void
-    let onCycle: (Int) -> Void
-
-    @State private var gestureAxis: Axis?
-    @State private var gestureStart: CGPoint?
-    @State private var gestureBeganAt: TimeInterval = 0
-
-    var body: some View {
-        ZStack(alignment: .bottom) {
-            Color.clear
-                .contentShape(Rectangle())
-
-            // Keep the visual affordance identical to AppWindow.
-            Capsule()
-                .fill(Color.primary.opacity(0.78))
-                .frame(width: 122, height: 5)
-                .padding(.bottom, 7)
-                .allowsHitTesting(false)
-        }
-        .contentShape(Rectangle())
-        .simultaneousGesture(bottomGesture)
-        .accessibilityIdentifier("VibeContainers.SharedSpringboardGuestControl")
-        .accessibilityLabel("VibeContainers system gestures")
-        .accessibilityHint("Swipe up for Home, pull slightly for Dock, pause for the app switcher, or swipe sideways to change apps.")
-    }
-
-    // This is intentionally the same state machine and thresholds as
-    // iOSSim/Springboard/AppWindow.swift's closeGesture.
-    private var bottomGesture: some Gesture {
-        DragGesture(minimumDistance: 12, coordinateSpace: .global)
-            .onChanged(updateGesture)
-            .onEnded { value in
-                let axis = gestureAxis
-                let elapsed = max(0, Date.timeIntervalSinceReferenceDate - gestureBeganAt)
-                gestureAxis = nil
-                gestureStart = nil
-                gestureBeganAt = 0
-
-                guard value.startLocation.y > screenHeight - 70 else { return }
-
-                if axis == .horizontal {
-                    let horizontal = abs(value.translation.width)
-                    guard horizontal > 48 else { return }
-                    onCycle(value.translation.width < 0 ? 1 : -1)
-                    return
-                }
-
-                guard axis == .vertical else { return }
-
-                let upwardTravel = max(0, -value.translation.height)
-                let predictedUpwardTravel = max(upwardTravel, -value.predictedEndTranslation.height)
-
-                if elapsed >= 0.34, upwardTravel >= 28, upwardTravel < 165 {
-                    onSwitcher()
-                } else if upwardTravel >= 64 || predictedUpwardTravel >= 150 {
-                    onHome()
-                } else if upwardTravel >= 12 {
-                    onDock()
-                }
-            }
-    }
-
-    private func updateGesture(_ value: DragGesture.Value) {
-        guard value.startLocation.y > screenHeight - 70 else { return }
-
-        if gestureStart != value.startLocation {
-            gestureStart = value.startLocation
-            gestureAxis = nil
-            gestureBeganAt = Date.timeIntervalSinceReferenceDate
-        }
-
-        let horizontalTravel = abs(value.translation.width)
-        let upwardTravel = max(0, -value.translation.height)
-        if gestureAxis == nil {
-            guard max(horizontalTravel, abs(value.translation.height)) >= 10 else { return }
-            if value.translation.height < 0,
-               upwardTravel > horizontalTravel * 1.15 {
-                gestureAxis = .vertical
-            } else {
-                gestureAxis = .horizontal
-            }
-        }
-    }
-}
-
 // MARK: - MultitaskDockView Manager
 @available(iOS 16.0, *)
 @objc public class MultitaskDockManager: NSObject, ObservableObject {
@@ -253,8 +162,6 @@ private struct GuestSpringboardBottomControl: View {
     /// Full-width host-owned bottom edge. Unlike a recognizer attached
     /// to a guest window, this remains reachable for maximized and
     /// windowed virtual guests and cannot be swallowed by the remote scene.
-    private var systemGestureSurface: UIView?
-    private var systemGestureHostingController: UIHostingController<AnyView>?
 
     public struct Constants {
         // MARK: - Layout & Sizing
@@ -505,14 +412,10 @@ private struct GuestSpringboardBottomControl: View {
         }
         rootView.bringSubviewToFront(windowHostingView)
 
-        // The bottom edge is a host/system affordance, so it must sit above
-        // every remote guest surface. The floating dock, when explicitly
-        // summoned, remains above the gesture strip so its controls still work.
-        installSystemGestureSurface()
-        if let gestureSurface = systemGestureSurface,
-           gestureSurface.superview === rootView {
-            rootView.bringSubviewToFront(gestureSurface)
-        }
+        // The app target owns the exact AppWindow bottom control. The framework
+        // only raises guest content; its visibility notification is delivered
+        // asynchronously afterward so Springboard can place the shared control
+        // above this UIKit host without maintaining a second gesture stack.
         if let dockView = hostingController?.view,
            let dockSuperview = dockView.superview {
             dockSuperview.bringSubviewToFront(dockView)
@@ -774,91 +677,18 @@ private struct GuestSpringboardBottomControl: View {
 
     // MARK: - Host-owned iPad-style system gesture surface
 
-    private func makeSharedGuestBottomControl(screenHeight: CGFloat) -> AnyView {
-        AnyView(
-            GuestSpringboardBottomControl(
-                screenHeight: screenHeight,
-                onHome: { [weak self] in
-                    self?.returnToHostHome()
-                },
-                onSwitcher: { [weak self] in
-                    self?.presentAppSwitcherLikeSpringboard()
-                },
-                onDock: { [weak self] in
-                    self?.showDockForSystemGesture()
-                },
-                onCycle: { [weak self] direction in
-                    self?.cycleAppLikeSpringboard(direction: direction)
-                }
-            )
-        )
-    }
-
-    private func installSystemGestureSurface() {
-        dispatchPrecondition(condition: .onQueue(.main))
-        guard let window = keyWindow,
-              let rootViewController = window.rootViewController else { return }
-        let rootView = rootViewController.view!
-
-        // AppWindow accepts a gesture only when it begins in the bottom 70pt.
-        // Host the exact SwiftUI DragGesture in that same physical region.
-        let height: CGFloat = 70
-        let frame = CGRect(
-            x: 0,
-            y: max(0, rootView.bounds.height - height),
-            width: rootView.bounds.width,
-            height: height
-        )
-
-        if let controller = systemGestureHostingController {
-            controller.rootView = makeSharedGuestBottomControl(screenHeight: rootView.bounds.height)
-            if controller.parent !== rootViewController {
-                controller.willMove(toParent: nil)
-                controller.view.removeFromSuperview()
-                controller.removeFromParent()
-                rootViewController.addChild(controller)
-                rootView.addSubview(controller.view)
-                controller.didMove(toParent: rootViewController)
-            } else if controller.view.superview !== rootView {
-                rootView.addSubview(controller.view)
-            }
-            controller.view.frame = frame
-            rootView.bringSubviewToFront(controller.view)
-            systemGestureSurface = controller.view
-            return
-        }
-
-        let controller = UIHostingController(
-            rootView: makeSharedGuestBottomControl(screenHeight: rootView.bounds.height)
-        )
-        controller.view.frame = frame
-        controller.view.autoresizingMask = [.flexibleWidth, .flexibleTopMargin]
-        controller.view.backgroundColor = .clear
-        controller.view.isOpaque = false
-        controller.view.isHidden = true
-
-        rootViewController.addChild(controller)
-        rootView.addSubview(controller.view)
-        controller.didMove(toParent: rootViewController)
-        rootView.bringSubviewToFront(controller.view)
-
-        systemGestureHostingController = controller
-        systemGestureSurface = controller.view
-        NSLog("VibeContainers: exact Springboard SwiftUI guest control installed")
-    }
-
     private func setSystemGestureSurfaceVisible(_ visible: Bool) {
         dispatchPrecondition(condition: .onQueue(.main))
-        installSystemGestureSurface()
-        systemGestureSurface?.isHidden = !visible
-        if visible,
-           let surface = systemGestureSurface,
-           let rootView = surface.superview {
-            rootView.bringSubviewToFront(surface)
-            if let dockView = hostingController?.view,
-               dockView.superview === rootView {
-                rootView.bringSubviewToFront(dockView)
-            }
+        var info: [String: Any] = ["visible": visible]
+        if let window = keyWindow {
+            info["window"] = window
+        }
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: Notification.Name("IOSSimGuestSpringboardControlVisibility"),
+                object: nil,
+                userInfo: info
+            )
         }
     }
 
@@ -877,7 +707,7 @@ private struct GuestSpringboardBottomControl: View {
     /// AppWindow's switcher path closes its app surface first, waits 230 ms,
     /// then asks RunningContainerStore to present the captured switcher. Do the
     /// same for a real guest instead of presenting from inside the live host.
-    private func presentAppSwitcherLikeSpringboard() {
+    @objc public func presentAppSwitcherLikeSpringboard() {
         dispatchPrecondition(condition: .onQueue(.main))
         setSystemGestureSurfaceVisible(false)
 
@@ -902,7 +732,8 @@ private struct GuestSpringboardBottomControl: View {
     }
 
     /// AppWindow closes first and changes apps after the same 230 ms handoff.
-    private func cycleAppLikeSpringboard(direction: Int) {
+    @objc(cycleAppLikeSpringboard:)
+    public func cycleAppLikeSpringboard(direction: Int) {
         dispatchPrecondition(condition: .onQueue(.main))
         let currentUUID = currentSystemGestureAppUUID()
         setSystemGestureSurfaceVisible(false)

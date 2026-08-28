@@ -141,6 +141,16 @@ int32_t IOSSimPresentMultitaskSwitcher(void) {
     return 0;
 }
 
+
+int32_t IOSSimPresentMultitaskSwitcherLikeSpringboard(void) {
+    if (![NSThread isMainThread]) return EDEADLK;
+    id manager = IOSSimMultitaskManager();
+    SEL selector = NSSelectorFromString(@"presentAppSwitcherLikeSpringboard");
+    if (!manager || ![manager respondsToSelector:selector]) return ENOSYS;
+    ((void (*)(id, SEL))objc_msgSend)(manager, selector);
+    return 0;
+}
+
 int32_t IOSSimReturnMultitaskHome(void) {
     if (![NSThread isMainThread]) return EDEADLK;
     id manager = IOSSimMultitaskManager();
@@ -169,6 +179,16 @@ int32_t IOSSimCycleMultitaskGuest(const char *dataUUIDBytes, int32_t direction) 
         manager, selector, dataUUID, (NSInteger)direction
     );
     return focused ? 0 : ENOENT;
+}
+
+
+int32_t IOSSimCycleMultitaskGuestLikeSpringboard(int32_t direction) {
+    if (![NSThread isMainThread]) return EDEADLK;
+    id manager = IOSSimMultitaskManager();
+    SEL selector = NSSelectorFromString(@"cycleAppLikeSpringboard:");
+    if (!manager || ![manager respondsToSelector:selector]) return ENOSYS;
+    ((void (*)(id, SEL, NSInteger))objc_msgSend)(manager, selector, (NSInteger)direction);
+    return 0;
 }
 
 int32_t IOSSimTerminateMultitaskGuests(void) {

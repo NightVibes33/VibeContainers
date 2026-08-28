@@ -320,15 +320,19 @@ enum ZipArchive {
         input: FileHandle,
         output: FileHandle
     ) throws {
-        var stream = compression_stream()
+        let stream = UnsafeMutablePointer<compression_stream>.allocate(capacity: 1)
         guard compression_stream_init(
-            &stream,
+            stream,
             COMPRESSION_STREAM_DECODE,
             COMPRESSION_ZLIB
         ) != COMPRESSION_STATUS_ERROR else {
+            stream.deallocate()
             throw ZipError.inflateFailed
         }
-        defer { compression_stream_destroy(&stream) }
+        defer {
+            compression_stream_destroy(stream)
+            stream.deallocate()
+        }
 
         var remaining = entry.compressedSize
         var totalWritten = 0
@@ -349,18 +353,18 @@ enum ZipArchive {
             try chunk.withUnsafeBytes { rawSource in
                 let source = rawSource.bindMemory(to: UInt8.self)
                 guard let sourceBase = source.baseAddress else { return }
-                stream.src_ptr = sourceBase
-                stream.src_size = source.count
+                stream.pointee.src_ptr = sourceBase
+                stream.pointee.src_size = source.count
 
                 repeat {
-                    let before = stream.src_size
+                    let before = stream.pointee.src_size
                     var produced = 0
                     let status = outputBuffer.withUnsafeMutableBytes { rawDestination -> compression_status in
                         let destination = rawDestination.bindMemory(to: UInt8.self)
-                        stream.dst_ptr = destination.baseAddress!
-                        stream.dst_size = outputCapacity
-                        let result = compression_stream_process(&stream, flags)
-                        produced = outputCapacity - stream.dst_size
+                        stream.pointee.dst_ptr = destination.baseAddress!
+                        stream.pointee.dst_size = outputCapacity
+                        let result = compression_stream_process(stream, flags)
+                        produced = outputCapacity - stream.pointee.dst_size
                         return result
                     }
 
@@ -375,7 +379,7 @@ enum ZipArchive {
                     if status == COMPRESSION_STATUS_END {
                         // A decoder that ends before consuming the entry's declared
                         // compressed bytes indicates a malformed central directory.
-                        guard stream.src_size == 0 else { throw ZipError.inflateFailed }
+                        guard stream.pointee.src_size == 0 else { throw ZipError.inflateFailed }
                         reachedEnd = true
                         break
                     }
@@ -385,10 +389,10 @@ enum ZipArchive {
                     // With FINALIZE set, a zero-length source may need another
                     // call to flush output and return END. Any call that neither
                     // consumes nor produces data cannot make forward progress.
-                    if stream.src_size == before && produced == 0 {
+                    if stream.pointee.src_size == before && produced == 0 {
                         throw ZipError.inflateFailed
                     }
-                } while stream.src_size > 0 || flags != 0
+                } while stream.pointee.src_size > 0 || flags != 0
             }
         }
 

@@ -50,13 +50,29 @@ private final class IPADownloadDelegate: NSObject, URLSessionDownloadDelegate, @
             try await withCheckedThrowingContinuation { continuation in
                 lock.withLock { self.continuation = continuation }
 
+                // IPA payloads can be hundreds of MB. Do not let URLCache
+                // retain another copy of a downloaded archive on the User volume.
+                let configuration = URLSessionConfiguration.ephemeral
+                configuration.urlCache = nil
+                configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+                configuration.timeoutIntervalForResource = 30 * 60
+
                 let session = URLSession(
-                    configuration: .default,
+                    configuration: configuration,
                     delegate: self,
                     delegateQueue: nil
                 )
                 self.session = session
-                let task = session.downloadTask(with: url)
+
+                var request = URLRequest(url: url)
+                request.timeoutInterval = 120
+                request.cachePolicy = .reloadIgnoringLocalCacheData
+                request.setValue(
+                    "application/octet-stream, application/zip, */*",
+                    forHTTPHeaderField: "Accept"
+                )
+                request.setValue("VibeContainers/1.0 (iOS)", forHTTPHeaderField: "User-Agent")
+                let task = session.downloadTask(with: request)
                 self.task = task
                 task.resume()
             }
@@ -139,7 +155,12 @@ private final class IPADownloadDelegate: NSObject, URLSessionDownloadDelegate, @
 @Observable
 final class GuestInstaller {
     static let shared = GuestInstaller()
-    private init() {}
+    private init() {
+        // A killed/terminated import can leave a full extracted app in Staging.
+        // Nothing in this directory is persistent state, so reclaim it before
+        // the next install instead of letting abandoned imports exhaust /User.
+        try? FileManager.default.removeItem(at: Self.stagingRoot)
+    }
 
     enum Phase: Equatable {
         case idle
@@ -188,8 +209,9 @@ final class GuestInstaller {
         guard activeInstalls.insert(bundle).inserted else { return false }
         defer { activeInstalls.remove(bundle) }
 
-        guard let raw = app.latest?.downloadURL, let url = URL(string: raw) else {
-            phases[bundle] = .failed("This version has no download URL.")
+        guard let raw = app.latest?.downloadURL,
+              let url = Self.resolveDownloadURL(raw, for: app) else {
+            phases[bundle] = .failed("This version has no usable download URL.")
             return false
         }
 
@@ -248,26 +270,31 @@ final class GuestInstaller {
 
     /// Installs an `.ipa` the user picked in the file browser.
     ///
-    /// The picked file lives outside the app, so its security scope has to be
-    /// open for the copy — and only for the copy: everything after this works
-    /// on iOSSim's own staging directory.
+    /// Keep the security scope open while the ZIP reader consumes the selected
+    /// file directly. The old implementation first copied the complete IPA into
+    /// Documents/Staging and then extracted it, requiring compressed IPA + copy
+    /// + expanded app to coexist and causing bogus-looking "volume User is out
+    /// of space" failures whose filename happened to be the guest executable.
     func installIPA(at picked: URL) async {
         let scoped = picked.startAccessingSecurityScopedResource()
         defer { if scoped { picked.stopAccessingSecurityScopedResource() } }
 
         let staging = Self.stagingRoot
             .appendingPathComponent("import-\(UUID().uuidString)", isDirectory: true)
-        let copy = staging.appendingPathComponent("import.ipa")
 
         do {
             try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
-            try FileManager.default.copyItem(at: picked, to: copy)
         } catch {
-            try? FileManager.default.removeItem(at: staging)
-            sideload = .failed("Could not read that file: \(error.localizedDescription)")
+            sideload = .failed("Could not create import staging: \(error.localizedDescription)")
             return
         }
-        await unpackAndInstall(copy, origin: "Local file")
+
+        await unpackAndInstall(
+            picked,
+            staging: staging,
+            origin: "Local file",
+            removeArchiveAfterExtraction: false
+        )
     }
 
     /// Downloads an `.ipa` from a link and installs it.
@@ -288,14 +315,23 @@ final class GuestInstaller {
             sideload = .failed(Self.describe(error))
             return
         }
-        await unpackAndInstall(copy, origin: remote.host() ?? "Link")
+        await unpackAndInstall(
+            copy,
+            staging: staging,
+            origin: remote.host() ?? "Link",
+            removeArchiveAfterExtraction: true
+        )
     }
 
     /// The shared tail of both routes: open the archive, learn what the app is
     /// from its own `Info.plist`, then hand it the same container treatment a
     /// catalogue install gets.
-    private func unpackAndInstall(_ ipa: URL, origin: String) async {
-        let staging = ipa.deletingLastPathComponent()
+    private func unpackAndInstall(
+        _ ipa: URL,
+        staging: URL,
+        origin: String,
+        removeArchiveAfterExtraction: Bool
+    ) async {
         let payload = staging.appendingPathComponent("Payload", isDirectory: true)
         var preserveTransactionForRecovery = false
         defer {
@@ -310,6 +346,12 @@ final class GuestInstaller {
             let modes = try await Task.detached(priority: .userInitiated) {
                 try ZipArchive.extract(ipa, to: staging)
             }.value
+            // Remote/link imports own their staged archive. Delete it as soon
+            // as extraction succeeds so signing/patching does not keep both the
+            // compressed IPA and expanded Payload on disk at the same time.
+            if removeArchiveAfterExtraction {
+                try? FileManager.default.removeItem(at: ipa)
+            }
             restoreExecutableBits(modes, under: staging)
         } catch {
             sideload = .failed(Self.describe(error))
@@ -391,6 +433,54 @@ final class GuestInstaller {
     private static var stagingRoot: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Staging", isDirectory: true)
+    }
+
+    /// Resolves the forms found in real AltStore-compatible sources: absolute
+    /// URLs, scheme-relative URLs, paths relative to the source JSON, and GitHub
+    /// `blob` links that otherwise download an HTML page instead of an IPA.
+    private static func resolveDownloadURL(_ raw: String, for app: AltApp) -> URL? {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return nil }
+
+        var sourceBase: URL?
+        for source in PackageStore.shared.sources {
+            let matches = PackageStore.shared.apps(for: source).contains { candidate in
+                candidate.bundleIdentifier == app.bundleIdentifier
+                    && candidate.latest?.downloadURL == raw
+            }
+            if matches {
+                sourceBase = SourceURL.normalise(source.url)
+                break
+            }
+        }
+
+        let candidate: URL?
+        if value.hasPrefix("//") {
+            candidate = URL(string: "https:" + value)
+        } else if let direct = URL(string: value), direct.scheme != nil {
+            candidate = direct
+        } else if let sourceBase {
+            candidate = URL(string: value, relativeTo: sourceBase)?.absoluteURL
+        } else {
+            candidate = nil
+        }
+
+        guard var resolved = candidate,
+              let scheme = resolved.scheme?.lowercased(),
+              scheme == "https" || scheme == "http" else { return nil }
+
+        if resolved.host?.lowercased() == "github.com" {
+            var parts = resolved.path.split(separator: "/").map(String.init)
+            if let blob = parts.firstIndex(of: "blob"), parts.count > blob + 1 {
+                parts.remove(at: blob)
+                if let rawURL = URL(
+                    string: "https://raw.githubusercontent.com/" + parts.joined(separator: "/")
+                ) {
+                    resolved = rawURL
+                }
+            }
+        }
+        return resolved
     }
 
     /// Lifts the app's own icon out of the bundle so the home screen shows it
@@ -1046,6 +1136,10 @@ final class GuestInstaller {
             let ns = error as NSError
             if ns.code == NSURLErrorNotConnectedToInternet { return "No internet connection." }
             if ns.code == NSURLErrorTimedOut { return "The download timed out." }
+            if (ns.domain == NSCocoaErrorDomain && ns.code == NSFileWriteOutOfSpaceError)
+                || (ns.domain == NSPOSIXErrorDomain && ns.code == Int(ENOSPC)) {
+                return "Not enough free device storage to unpack this IPA."
+            }
             return ns.localizedDescription
         }
     }

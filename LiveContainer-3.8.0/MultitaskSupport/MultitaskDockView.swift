@@ -407,6 +407,9 @@ class AppInfoProvider {
         guard let window = keyWindow,
               let rootView = window.rootViewController?.view else { return }
         hostWindow = window
+        // Any route that focuses a guest owns the host again. This reverses
+        // demoteHostedSurfacesForHostOverlay() after a switcher card is tapped.
+        windowHostingView.isUserInteractionEnabled = true
 
         if windowHostingView.superview !== rootView {
             windowHostingView.removeFromSuperview()
@@ -690,21 +693,21 @@ class AppInfoProvider {
         guard let window = keyWindow,
               let rootView = window.rootViewController?.view else { return }
 
-        let systemBottomInset = max(window.safeAreaInsets.bottom, rootView.safeAreaInsets.bottom)
-        let controlHeight: CGFloat = 52
-        let gapAboveSystemZone: CGFloat = 6
-        let controlBottom = max(0, rootView.bounds.height - systemBottomInset - gapAboveSystemZone)
+        // Match the working AppWindow/home-indicator placement. v6 moved this
+        // strip above the safe-area zone, which visibly shifted the control.
+        // Keep v6's cached cancellation/action handling, but restore the original
+        // bottom geometry used by the controls that already work correctly.
+        let height = max(54, window.safeAreaInsets.bottom + 36)
         let frame = CGRect(
             x: 0,
-            y: max(0, controlBottom - controlHeight),
+            y: max(0, rootView.bounds.height - height),
             width: rootView.bounds.width,
-            height: controlHeight
+            height: height
         )
         NSLog(
-            "VibeContainers: app-owned bottom gesture strip y=%.1f h=%.1f systemInset=%.1f",
+            "VibeContainers: guest gesture bar restored to working bottom position y=%.1f h=%.1f",
             frame.origin.y,
-            frame.height,
-            systemBottomInset
+            frame.height
         )
 
         if let surface = systemGestureSurface {
@@ -739,7 +742,7 @@ class AppInfoProvider {
         surface.addSubview(pill)
         NSLayoutConstraint.activate([
             pill.centerXAnchor.constraint(equalTo: surface.centerXAnchor),
-            pill.bottomAnchor.constraint(equalTo: surface.bottomAnchor, constant: -4),
+            pill.bottomAnchor.constraint(equalTo: surface.bottomAnchor, constant: -7),
             pill.widthAnchor.constraint(equalToConstant: 122),
             pill.heightAnchor.constraint(equalToConstant: 5),
         ])
@@ -945,6 +948,21 @@ class AppInfoProvider {
         return focused
     }
 
+    /// Moves LiveContainer's UIKit host below the SwiftUI Springboard while a
+    /// host-owned overlay (notably ContainerSwitcherView) is presented. Guest
+    /// child views stay attached and their processes keep running; selecting a
+    /// card restores this host through raiseHostedSurfaces().
+    private func demoteHostedSurfacesForHostOverlay() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard let window = keyWindow,
+              let rootView = window.rootViewController?.view,
+              windowHostingView.superview === rootView else { return }
+
+        windowHostingView.isUserInteractionEnabled = false
+        rootView.sendSubviewToBack(windowHostingView)
+        NSLog("VibeContainers: guest host demoted below SwiftUI switcher")
+    }
+
     /// Reveals VibeContainers' adaptive app switcher after clearing the guest
     /// windows from the host surface. The processes themselves keep running.
     @objc public func presentAppSwitcher() {
@@ -965,6 +983,7 @@ class AppInfoProvider {
             let previews = self.captureAppSwitcherPreviews()
             let previewViews = self.captureAppSwitcherPreviewViews()
             self.hideGuestSurfacesForAppSwitcher()
+            self.demoteHostedSurfacesForHostOverlay()
             NotificationCenter.default.post(
                 name: Notification.Name("IOSSimShowContainerSwitcher"),
                 object: nil,

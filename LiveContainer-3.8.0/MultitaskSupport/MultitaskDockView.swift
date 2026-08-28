@@ -125,6 +125,97 @@ class AppInfoProvider {
     }
 }
 
+// MARK: - Shared Springboard-style guest bottom control
+@available(iOS 16.0, *)
+private struct GuestSpringboardBottomControl: View {
+    let screenHeight: CGFloat
+    let onHome: () -> Void
+    let onSwitcher: () -> Void
+    let onDock: () -> Void
+    let onCycle: (Int) -> Void
+
+    @State private var gestureAxis: Axis?
+    @State private var gestureStart: CGPoint?
+    @State private var gestureBeganAt: TimeInterval = 0
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            Color.clear
+                .contentShape(Rectangle())
+
+            // Keep the visual affordance identical to AppWindow.
+            Capsule()
+                .fill(Color.primary.opacity(0.78))
+                .frame(width: 122, height: 5)
+                .padding(.bottom, 7)
+                .allowsHitTesting(false)
+        }
+        .contentShape(Rectangle())
+        .simultaneousGesture(bottomGesture)
+        .accessibilityIdentifier("VibeContainers.SharedSpringboardGuestControl")
+        .accessibilityLabel("VibeContainers system gestures")
+        .accessibilityHint("Swipe up for Home, pull slightly for Dock, pause for the app switcher, or swipe sideways to change apps.")
+    }
+
+    // This is intentionally the same state machine and thresholds as
+    // iOSSim/Springboard/AppWindow.swift's closeGesture.
+    private var bottomGesture: some Gesture {
+        DragGesture(minimumDistance: 12, coordinateSpace: .global)
+            .onChanged(updateGesture)
+            .onEnded { value in
+                let axis = gestureAxis
+                let elapsed = max(0, Date.timeIntervalSinceReferenceDate - gestureBeganAt)
+                gestureAxis = nil
+                gestureStart = nil
+                gestureBeganAt = 0
+
+                guard value.startLocation.y > screenHeight - 70 else { return }
+
+                if axis == .horizontal {
+                    let horizontal = abs(value.translation.width)
+                    guard horizontal > 48 else { return }
+                    onCycle(value.translation.width < 0 ? 1 : -1)
+                    return
+                }
+
+                guard axis == .vertical else { return }
+
+                let upwardTravel = max(0, -value.translation.height)
+                let predictedUpwardTravel = max(upwardTravel, -value.predictedEndTranslation.height)
+
+                if elapsed >= 0.34, upwardTravel >= 28, upwardTravel < 165 {
+                    onSwitcher()
+                } else if upwardTravel >= 64 || predictedUpwardTravel >= 150 {
+                    onHome()
+                } else if upwardTravel >= 12 {
+                    onDock()
+                }
+            }
+    }
+
+    private func updateGesture(_ value: DragGesture.Value) {
+        guard value.startLocation.y > screenHeight - 70 else { return }
+
+        if gestureStart != value.startLocation {
+            gestureStart = value.startLocation
+            gestureAxis = nil
+            gestureBeganAt = Date.timeIntervalSinceReferenceDate
+        }
+
+        let horizontalTravel = abs(value.translation.width)
+        let upwardTravel = max(0, -value.translation.height)
+        if gestureAxis == nil {
+            guard max(horizontalTravel, abs(value.translation.height)) >= 10 else { return }
+            if value.translation.height < 0,
+               upwardTravel > horizontalTravel * 1.15 {
+                gestureAxis = .vertical
+            } else {
+                gestureAxis = .horizontal
+            }
+        }
+    }
+}
+
 // MARK: - MultitaskDockView Manager
 @available(iOS 16.0, *)
 @objc public class MultitaskDockManager: NSObject, ObservableObject {
@@ -163,12 +254,7 @@ class AppInfoProvider {
     /// to a guest window, this remains reachable for maximized and
     /// windowed virtual guests and cannot be swallowed by the remote scene.
     private var systemGestureSurface: UIView?
-    private var systemGesturePill: UIView?
-    private var systemGestureRecognizer: UIPanGestureRecognizer?
-    private var systemGestureBeganAt: TimeInterval = 0
-    private var systemGestureTriggered = false
-    private var systemGestureLastTranslation: CGPoint = .zero
-    private var systemGestureLastVelocity: CGPoint = .zero
+    private var systemGestureHostingController: UIHostingController<AnyView>?
 
     public struct Constants {
         // MARK: - Layout & Sizing
@@ -688,79 +774,77 @@ class AppInfoProvider {
 
     // MARK: - Host-owned iPad-style system gesture surface
 
+    private func makeSharedGuestBottomControl(screenHeight: CGFloat) -> AnyView {
+        AnyView(
+            GuestSpringboardBottomControl(
+                screenHeight: screenHeight,
+                onHome: { [weak self] in
+                    self?.returnToHostHome()
+                },
+                onSwitcher: { [weak self] in
+                    self?.presentAppSwitcherLikeSpringboard()
+                },
+                onDock: { [weak self] in
+                    self?.showDockForSystemGesture()
+                },
+                onCycle: { [weak self] direction in
+                    self?.cycleAppLikeSpringboard(direction: direction)
+                }
+            )
+        )
+    }
+
     private func installSystemGestureSurface() {
         dispatchPrecondition(condition: .onQueue(.main))
         guard let window = keyWindow,
-              let rootView = window.rootViewController?.view else { return }
+              let rootViewController = window.rootViewController else { return }
+        let rootView = rootViewController.view!
 
-        // Match the working AppWindow/home-indicator placement. v6 moved this
-        // strip above the safe-area zone, which visibly shifted the control.
-        // Keep v6's cached cancellation/action handling, but restore the original
-        // bottom geometry used by the controls that already work correctly.
-        let height = max(54, window.safeAreaInsets.bottom + 36)
+        // AppWindow accepts a gesture only when it begins in the bottom 70pt.
+        // Host the exact SwiftUI DragGesture in that same physical region.
+        let height: CGFloat = 70
         let frame = CGRect(
             x: 0,
             y: max(0, rootView.bounds.height - height),
             width: rootView.bounds.width,
             height: height
         )
-        NSLog(
-            "VibeContainers: guest gesture bar restored to working bottom position y=%.1f h=%.1f",
-            frame.origin.y,
-            frame.height
-        )
 
-        if let surface = systemGestureSurface {
-            if surface.superview !== rootView {
-                surface.removeFromSuperview()
-                rootView.addSubview(surface)
+        if let controller = systemGestureHostingController {
+            controller.rootView = makeSharedGuestBottomControl(screenHeight: rootView.bounds.height)
+            if controller.parent !== rootViewController {
+                controller.willMove(toParent: nil)
+                controller.view.removeFromSuperview()
+                controller.removeFromParent()
+                rootViewController.addChild(controller)
+                rootView.addSubview(controller.view)
+                controller.didMove(toParent: rootViewController)
+            } else if controller.view.superview !== rootView {
+                rootView.addSubview(controller.view)
             }
-            surface.frame = frame
-            rootView.bringSubviewToFront(surface)
+            controller.view.frame = frame
+            rootView.bringSubviewToFront(controller.view)
+            systemGestureSurface = controller.view
             return
         }
 
-        let surface = UIView(frame: frame)
-        surface.autoresizingMask = [.flexibleWidth, .flexibleTopMargin]
-        surface.backgroundColor = .clear
-        surface.isUserInteractionEnabled = true
-        surface.isMultipleTouchEnabled = false
-        surface.isHidden = true
-        surface.accessibilityIdentifier = "VibeContainers.SystemGestureSurface"
-        surface.accessibilityLabel = "VibeContainers system gestures"
-        surface.accessibilityHint = "Swipe up for Home, pull slightly for Dock, pause for the app switcher, or swipe sideways to change apps."
+        let controller = UIHostingController(
+            rootView: makeSharedGuestBottomControl(screenHeight: rootView.bounds.height)
+        )
+        controller.view.frame = frame
+        controller.view.autoresizingMask = [.flexibleWidth, .flexibleTopMargin]
+        controller.view.backgroundColor = .clear
+        controller.view.isOpaque = false
+        controller.view.isHidden = true
 
-        let pill = UIView(frame: .zero)
-        pill.translatesAutoresizingMaskIntoConstraints = false
-        pill.isUserInteractionEnabled = false
-        pill.backgroundColor = UIColor.label.withAlphaComponent(0.82)
-        pill.layer.cornerRadius = 2.5
-        pill.layer.shadowColor = UIColor.systemBackground.cgColor
-        pill.layer.shadowOpacity = 0.65
-        pill.layer.shadowRadius = 1.5
-        pill.layer.shadowOffset = .zero
-        surface.addSubview(pill)
-        NSLayoutConstraint.activate([
-            pill.centerXAnchor.constraint(equalTo: surface.centerXAnchor),
-            pill.bottomAnchor.constraint(equalTo: surface.bottomAnchor, constant: -7),
-            pill.widthAnchor.constraint(equalToConstant: 122),
-            pill.heightAnchor.constraint(equalToConstant: 5),
-        ])
+        rootViewController.addChild(controller)
+        rootView.addSubview(controller.view)
+        controller.didMove(toParent: rootViewController)
+        rootView.bringSubviewToFront(controller.view)
 
-        let pan = UIPanGestureRecognizer(target: self, action: #selector(handleSystemGesture(_:)))
-        pan.minimumNumberOfTouches = 1
-        pan.maximumNumberOfTouches = 1
-        pan.cancelsTouchesInView = true
-        pan.delaysTouchesBegan = false
-        pan.delaysTouchesEnded = false
-        surface.addGestureRecognizer(pan)
-
-        rootView.addSubview(surface)
-        rootView.bringSubviewToFront(surface)
-        systemGestureSurface = surface
-        systemGesturePill = pill
-        systemGestureRecognizer = pan
-        NSLog("VibeContainers: host bottom gesture surface installed")
+        systemGestureHostingController = controller
+        systemGestureSurface = controller.view
+        NSLog("VibeContainers: exact Springboard SwiftUI guest control installed")
     }
 
     private func setSystemGestureSurfaceVisible(_ visible: Bool) {
@@ -779,9 +863,6 @@ class AppInfoProvider {
     }
 
     private func currentSystemGestureAppUUID() -> String? {
-        // Prefer the actual visible virtual surface. Falling back to the last
-        // registry entry keeps horizontal switching deterministic for a native
-        // scene whose UIView is not hosted in windowHostingView.
         for app in apps.reversed() {
             if let view = app.view,
                view.window != nil,
@@ -793,97 +874,44 @@ class AppInfoProvider {
         return apps.last?.appUUID
     }
 
-    @objc private func handleSystemGesture(_ gesture: UIPanGestureRecognizer) {
-        guard !apps.isEmpty else { return }
+    /// AppWindow's switcher path closes its app surface first, waits 230 ms,
+    /// then asks RunningContainerStore to present the captured switcher. Do the
+    /// same for a real guest instead of presenting from inside the live host.
+    private func presentAppSwitcherLikeSpringboard() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        setSystemGestureSurfaceVisible(false)
 
-        let translation: CGPoint
-        let velocity: CGPoint
-        switch gesture.state {
-        case .began:
-            systemGestureTriggered = false
-            systemGestureBeganAt = ProcessInfo.processInfo.systemUptime
-            systemGestureLastTranslation = .zero
-            systemGestureLastVelocity = .zero
-            return
-        case .changed:
-            translation = gesture.translation(in: gesture.view)
-            velocity = gesture.velocity(in: gesture.view)
-            systemGestureLastTranslation = translation
-            systemGestureLastVelocity = velocity
-        case .ended:
-            translation = gesture.translation(in: gesture.view)
-            velocity = gesture.velocity(in: gesture.view)
-            systemGestureLastTranslation = translation
-            systemGestureLastVelocity = velocity
-        case .cancelled:
-            translation = systemGestureLastTranslation
-            velocity = systemGestureLastVelocity
-            NSLog(
-                "VibeContainers: bottom gesture cancelled; using cached translation x=%.1f y=%.1f velocityY=%.1f",
-                translation.x,
-                translation.y,
-                velocity.y
+        let previews = captureAppSwitcherPreviews()
+        let previewViews = captureAppSwitcherPreviewViews()
+        hideGuestSurfacesForAppSwitcher()
+        demoteHostedSurfacesForHostOverlay()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.230) { [weak self] in
+            guard let self else { return }
+            NotificationCenter.default.post(
+                name: Notification.Name("IOSSimShowContainerSwitcher"),
+                object: nil,
+                userInfo: [
+                    "previews": previews,
+                    "previewViews": previewViews,
+                    "animated": true,
+                ]
             )
-        case .failed:
-            systemGestureTriggered = false
-            systemGestureBeganAt = 0
-            systemGestureLastTranslation = .zero
-            systemGestureLastVelocity = .zero
-            return
-        default:
-            return
+            NSLog("VibeContainers: Springboard-matched guest switcher committed after 230 ms")
         }
+    }
 
-        guard !systemGestureTriggered else { return }
-        let horizontal = abs(translation.x)
-        let upward = max(0, -translation.y)
-        let elapsed = max(0, ProcessInfo.processInfo.systemUptime - systemGestureBeganAt)
+    /// AppWindow closes first and changes apps after the same 230 ms handoff.
+    private func cycleAppLikeSpringboard(direction: Int) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        let currentUUID = currentSystemGestureAppUUID()
+        setSystemGestureSurfaceVisible(false)
+        hideGuestSurfacesForAppSwitcher()
 
-        // iPad-style home-indicator scrub: directly focus the adjacent running
-        // container through the existing focus path.
-        if horizontal >= 46, horizontal > abs(translation.y) * 1.20 {
-            systemGestureTriggered = true
-            let direction = translation.x < 0 ? 1 : -1
-            let feedback = UIImpactFeedbackGenerator(style: .light)
-            feedback.impactOccurred()
-            _ = cycleApp(from: currentSystemGestureAppUUID(), direction: direction)
-            return
-        }
-
-        if gesture.state == .changed {
-            // Lift and pause: use VibeContainers' existing captured-preview
-            // app switcher. Keep the threshold forgiving enough to feel like
-            // iPadOS rather than requiring a precisely measured drag.
-            if elapsed >= 0.30, upward >= 22, upward < 190,
-               upward > horizontal * 1.05, abs(velocity.y) < 1200 {
-                systemGestureTriggered = true
-                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                presentAppSwitcher()
-                return
-            }
-
-            // A decisive upward flick returns to Vibe Home immediately while
-            // retaining every guest process for later focus/resume.
-            if elapsed < 0.45, upward >= 46, upward > horizontal * 1.02,
-               velocity.y < -260 {
-                systemGestureTriggered = true
-                returnToHostHome()
-                return
-            }
-            return
-        }
-
-        let predictedUpward = max(upward, upward + max(0, -velocity.y) * 0.08)
-        systemGestureTriggered = true
-        systemGestureBeganAt = 0
-        if elapsed >= 0.30, upward >= 22, upward < 190 {
-            presentAppSwitcher()
-        } else if upward >= 40 || predictedUpward >= 88 {
-            returnToHostHome()
-        } else if upward >= 6 {
-            showDockForSystemGesture()
-        } else {
-            systemGestureTriggered = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.230) { [weak self] in
+            guard let self else { return }
+            _ = self.cycleApp(from: currentUUID, direction: direction)
+            NSLog("VibeContainers: Springboard-matched guest cycle committed after 230 ms")
         }
     }
 

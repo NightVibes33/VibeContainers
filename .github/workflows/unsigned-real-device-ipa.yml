@@ -40,6 +40,7 @@ jobs:
           python3 scripts/apply_installer_followups.py
           python3 scripts/apply_xcode26_fixes.py
           python3 scripts/apply_ipad_gestures_v2.py
+          python3 scripts/apply_ipad_gestures_v3.py
 
       - name: Persist source fixes to main
         shell: bash
@@ -67,7 +68,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "4189828+github-actions[bot]@users.noreply.github.com"
           git add -- "${FILES[@]}"
-          git commit -m "Add bottom-edge iPad-style multitasking gestures [skip ci]"
+          git commit -m "Move iPad gestures to host bottom edge [skip ci]"
           git push origin HEAD:main
 
       - name: Show toolchain
@@ -122,8 +123,10 @@ jobs:
 
           APP="$CHECK/Payload/iOSSim.app"
           BIN="$APP/iOSSim"
+          LC_FRAMEWORK="$APP/Frameworks/LiveContainerSwiftUI.framework/LiveContainerSwiftUI"
           test -d "$APP"
           test -f "$BIN"
+          test -f "$LC_FRAMEWORK"
 
           if find "$APP" -name embedded.mobileprovision -o -name '*.p12' -o -name '*.pfx' | grep -q .; then
             echo "Signing material unexpectedly present in unsigned IPA" >&2
@@ -142,6 +145,20 @@ jobs:
           /usr/bin/file "$BIN" | grep -qi 'arm64'
           xcrun vtool -show-build "$BIN" | tee "$RUNNER_TEMP/vtool.txt"
           grep -Eqi 'platform[[:space:]]+(IOS|2)' "$RUNNER_TEMP/vtool.txt"
+
+          # A green compile is not enough: prove the framework inside the IPA
+          # actually contains the host-owned physical-bottom gesture runtime.
+          strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: host bottom gesture surface installed'
+          strings "$LC_FRAMEWORK" | grep -F 'VibeContainers.SystemGestureSurface'
+          strings "$LC_FRAMEWORK" | grep -F 'per-window bottom grabber disabled; host owns bottom gestures'
+          if strings "$LC_FRAMEWORK" | grep -E 'multitaskSwipeGesture|handleMultitaskSwipeGesture|minimumNumberOfTouches = 4|maximumNumberOfTouches = 5|MagnificationGesture' >/dev/null; then
+            echo "Forbidden multi-finger/pinch gesture implementation found in shipped framework" >&2
+            exit 1
+          fi
+          if strings "$BIN" | grep -F 'Use the floating dock to switch, resize, minimize or close it.' >/dev/null; then
+            echo "Legacy floating-dock launch guidance is still shipped" >&2
+            exit 1
+          fi
 
           shasum -a 256 "$IPA" | tee "$RUNNER_TEMP/VibeContainers-unsigned-real-device.ipa.sha256"
 

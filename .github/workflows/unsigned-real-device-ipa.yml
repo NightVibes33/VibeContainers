@@ -41,6 +41,7 @@ jobs:
           python3 scripts/apply_xcode26_fixes.py
           python3 scripts/apply_ipad_gestures_v2.py
           python3 scripts/apply_ipad_gestures_v3.py
+          python3 scripts/apply_virtual_host_lock.py
 
       - name: Persist source fixes to main
         shell: bash
@@ -50,6 +51,7 @@ jobs:
             iOSSim/Model/GuestInstaller.swift
             iOSSim/Model/PackageStore.swift
             iOSSim/Model/RunningContainerStore.swift
+            iOSSim/Model/MultitaskPreferences.swift
             iOSSim/Apps/PackagesView.swift
             iOSSim/Apps/GuestContainerView.swift
             iOSSim/Model/ZipArchive.swift
@@ -58,6 +60,7 @@ jobs:
             iOSSim/Springboard/PageTransition.swift
             iOSSim/Springboard/SpringboardView.swift
             iOSSim/Runtime/MultitaskBridge.m
+            LiveContainer-3.8.0/LiveContainerSwiftUI/Utilities/LCUtils.m
             LiveContainer-3.8.0/MultitaskSupport/DecoratedAppSceneViewController.m
             LiveContainer-3.8.0/MultitaskSupport/MultitaskDockView.swift
           )
@@ -68,7 +71,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "4189828+github-actions[bot]@users.noreply.github.com"
           git add -- "${FILES[@]}"
-          git commit -m "Move iPad gestures to host bottom edge [skip ci]"
+          git commit -m "Force Vibe guest launches through host gesture surface [skip ci]"
           git push origin HEAD:main
 
       - name: Show toolchain
@@ -151,6 +154,8 @@ jobs:
           strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: host bottom gesture surface installed'
           strings "$LC_FRAMEWORK" | grep -F 'VibeContainers.SystemGestureSurface'
           strings "$LC_FRAMEWORK" | grep -F 'per-window bottom grabber disabled; host owns bottom gestures'
+          strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: FORCED virtual-window guest host'
+          strings "$BIN" | grep -F 'VibeContainers: migrating saved multitask mode'
           if strings "$LC_FRAMEWORK" | grep -E 'multitaskSwipeGesture|handleMultitaskSwipeGesture|minimumNumberOfTouches = 4|maximumNumberOfTouches = 5|MagnificationGesture' >/dev/null; then
             echo "Forbidden multi-finger/pinch gesture implementation found in shipped framework" >&2
             exit 1

@@ -472,13 +472,22 @@ class AppInfoProvider {
     }
     
     private func setupDockView() {
-        DispatchQueue.main.async {
+        let create = {
+            guard self.hostingController == nil else { return }
             let dockView = AnyView(MultitaskDockSwiftView()
                 .environmentObject(self))
-            
-            self.hostingController = UIHostingController(rootView: dockView)
-            self.hostingController?.view.autoresizingMask = [.flexibleTopMargin, .flexibleLeftMargin, .flexibleRightMargin, .flexibleBottomMargin]
-            self.hostingController?.view.backgroundColor = .clear
+
+            let controller = UIHostingController(rootView: dockView)
+            controller.view.autoresizingMask = [.flexibleTopMargin, .flexibleLeftMargin, .flexibleRightMargin, .flexibleBottomMargin]
+            controller.view.backgroundColor = .clear
+            self.hostingController = controller
+            NSLog("VibeContainers: Dock hosting controller ready")
+        }
+
+        if Thread.isMainThread {
+            create()
+        } else {
+            DispatchQueue.main.async(execute: create)
         }
     }
 
@@ -594,14 +603,16 @@ class AppInfoProvider {
                 )
             }
 
-            // Native-window mode still needs lifecycle bookkeeping for the
-            // host switcher; only the floating dock UI is mode-specific.
-            guard self.isDockEnabled() else { return }
-            
             if self.apps.isEmpty {
                 self.setSystemGestureSurfaceVisible(false)
                 self.hideDock()
-            } else if self.isVisible {
+                return
+            }
+
+            // Dock layout updates remain mode-specific, but lifecycle cleanup
+            // above must run on every device idiom.
+            guard self.isDockEnabled() else { return }
+            if self.isVisible {
                 self.updateDockFrame()
             }
         }
@@ -850,12 +861,11 @@ class AppInfoProvider {
     @objc public func returnToHostHome() {
         let action = {
             self.setSystemGestureSurfaceVisible(false)
-            _ = self.captureAppSwitcherPreviews()
-            _ = self.captureAppSwitcherPreviewViews()
             self.gestureDockOverride = false
             self.hideGuestSurfacesForAppSwitcher()
             self.hideDock()
             self.raiseHostedSurfaces()
+            NSLog("VibeContainers: Home gesture committed immediately")
         }
         if Thread.isMainThread { action() } else { DispatchQueue.main.async(execute: action) }
     }

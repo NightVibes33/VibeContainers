@@ -312,7 +312,7 @@ final class PackageStore {
         updateBundleIdentifiers = Set(updates.map(\.installed.bundleIdentifier))
     }
 
-    private func catalogEntry(for record: InstalledApp) -> Entry? {
+    func catalogEntry(for record: InstalledApp) -> Entry? {
         if let sourceID = record.sourceID,
            let entry = catalogIndex.entriesBySource[sourceID]?.first(where: {
                $0.app.bundleIdentifier == record.bundleIdentifier

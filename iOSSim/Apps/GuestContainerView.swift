@@ -164,7 +164,7 @@ struct GuestContainerView: View {
                 Haptics.tap(report?.ok == true ? .medium : .rigid)
             }
         } else {
-            guard let container, let app = appFromCatalog() else {
+            guard let record, let entry = store.catalogEntry(for: record) else {
                 report = GuestInstaller.LaunchOutcome(
                     ok: false, headline: "Not in a loaded source",
                     detail: "Refresh the source this app came from, or install its .ipa again from ★ Applications."
@@ -172,13 +172,8 @@ struct GuestContainerView: View {
                 return
             }
             report = nil
-            Task { await installer.install(app, into: container) }
+            store.install(entry.app, from: entry.sourceName, sourceID: entry.sourceID)
         }
-    }
-
-    /// The live `AltApp` for this bundle, needed for its download URL.
-    private func appFromCatalog() -> AltApp? {
-        store.entry(bundleIdentifier: bundleIdentifier)?.app
     }
 
     // MARK: - Report

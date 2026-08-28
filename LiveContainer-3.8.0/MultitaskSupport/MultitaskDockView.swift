@@ -776,7 +776,10 @@ class AppInfoProvider {
             systemGestureTriggered = false
             systemGestureBeganAt = ProcessInfo.processInfo.systemUptime
             return
-        case .cancelled, .failed:
+        case .cancelled:
+            NSLog("VibeContainers: bottom gesture cancelled by UIKit; committing last translation")
+            break
+        case .failed:
             systemGestureTriggered = false
             systemGestureBeganAt = 0
             return
@@ -808,8 +811,8 @@ class AppInfoProvider {
             // Lift and pause: use VibeContainers' existing captured-preview
             // app switcher. Keep the threshold forgiving enough to feel like
             // iPadOS rather than requiring a precisely measured drag.
-            if elapsed >= 0.38, upward >= 30, upward < 170,
-               upward > horizontal * 1.10, abs(velocity.y) < 950 {
+            if elapsed >= 0.30, upward >= 22, upward < 190,
+               upward > horizontal * 1.05, abs(velocity.y) < 1200 {
                 systemGestureTriggered = true
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                 presentAppSwitcher()
@@ -818,8 +821,8 @@ class AppInfoProvider {
 
             // A decisive upward flick returns to Vibe Home immediately while
             // retaining every guest process for later focus/resume.
-            if elapsed < 0.32, upward >= 78, upward > horizontal * 1.05,
-               velocity.y < -550 {
+            if elapsed < 0.45, upward >= 46, upward > horizontal * 1.02,
+               velocity.y < -260 {
                 systemGestureTriggered = true
                 returnToHostHome()
                 return
@@ -830,11 +833,11 @@ class AppInfoProvider {
         let predictedUpward = max(upward, upward + max(0, -velocity.y) * 0.08)
         systemGestureTriggered = true
         systemGestureBeganAt = 0
-        if elapsed >= 0.34, upward >= 28, upward < 170 {
+        if elapsed >= 0.30, upward >= 22, upward < 190 {
             presentAppSwitcher()
-        } else if upward >= 58 || predictedUpward >= 135 {
+        } else if upward >= 40 || predictedUpward >= 88 {
             returnToHostHome()
-        } else if upward >= 10 {
+        } else if upward >= 6 {
             showDockForSystemGesture()
         } else {
             systemGestureTriggered = false
@@ -953,8 +956,22 @@ class AppInfoProvider {
     /// processes continue running.
     private func hideGuestSurfacesForAppSwitcher() {
         dispatchPrecondition(condition: .onQueue(.main))
-        apps.forEach { app in
-            guard let view = app.view else { return }
+
+        var guestViews: [UIView] = apps.compactMap { $0.view }
+        for hostedView in windowHostingView.subviews {
+            guard hostedView._viewDelegate() is DecoratedAppSceneViewController else { continue }
+            if !guestViews.contains(where: { $0 === hostedView }) {
+                guestViews.append(hostedView)
+            }
+        }
+
+        NSLog(
+            "VibeContainers: hiding guest surfaces registered=%ld concrete=%ld hosted=%ld",
+            apps.count,
+            guestViews.count,
+            windowHostingView.subviews.count
+        )
+        guestViews.forEach { view in
             view.layer.removeAllAnimations()
             view.transform = .identity
             view.alpha = 0
@@ -965,7 +982,13 @@ class AppInfoProvider {
     
     @objc public func showDock() {
         guard isDockEnabled() else { return }
-        guard !isVisible, let hostingController = hostingController else { return }
+        if hostingController == nil {
+            setupDockView()
+        }
+        guard !isVisible, let hostingController = hostingController else {
+            NSLog("VibeContainers: Dock action could not create hosting controller")
+            return
+        }
         
         guard let keyWindow = self.keyWindow,
               let rootViewController = keyWindow.rootViewController else { return }
@@ -1442,8 +1465,19 @@ class AppInfoProvider {
         
         DispatchQueue.main.async {
             self.raiseHostedSurfaces()
-            guard !self.apps.contains(where: { $0.appUUID == appUUID }) else { return }
-            self.apps.append(appModel)
+            if let existingIndex = self.apps.firstIndex(where: { $0.appUUID == appUUID }) {
+                if let view, self.apps[existingIndex].view !== view {
+                    self.apps[existingIndex] = DockAppModel(
+                        appName: appName,
+                        appUUID: appUUID,
+                        appInfo: appInfo ?? self.apps[existingIndex].appInfo,
+                        view: view
+                    )
+                    NSLog("VibeContainers: rebound guest UIView for %@", appUUID)
+                }
+            } else {
+                self.apps.append(appModel)
+            }
             if UIDevice.current.userInterfaceIdiom == .phone,
                let view,
                view.superview === self.windowHostingView,

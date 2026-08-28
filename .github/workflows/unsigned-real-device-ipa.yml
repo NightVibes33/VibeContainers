@@ -45,6 +45,7 @@ jobs:
           python3 scripts/apply_ipad_gestures_v5.py
           python3 scripts/apply_ipad_gestures_v6.py
           python3 scripts/apply_guest_switcher_layer_v7.py
+          python3 scripts/apply_guest_bar_position_v8.py
           python3 scripts/apply_home_layout_persistence.py
 
           # A restored custom layout must never be auto-packed back into Dock.
@@ -57,13 +58,12 @@ jobs:
             exit 1
           fi
 
-          # Vibe's pan must be app-owned, not overlap iOS's physical Home edge.
-          grep -Fq 'let systemBottomInset = max(window.safeAreaInsets.bottom, rootView.safeAreaInsets.bottom)' LiveContainer-3.8.0/MultitaskSupport/MultitaskDockView.swift
+          # Keep the guest control in the same bottom position as the working
+          # AppWindow control. v6's raised position must not survive v8.
+          grep -Fq 'let height = max(54, window.safeAreaInsets.bottom + 36)' LiveContainer-3.8.0/MultitaskSupport/MultitaskDockView.swift
+          grep -Fq 'pill.bottomAnchor.constraint(equalTo: surface.bottomAnchor, constant: -7)' LiveContainer-3.8.0/MultitaskSupport/MultitaskDockView.swift
+          grep -Fq 'guest gesture bar restored to working bottom position' LiveContainer-3.8.0/MultitaskSupport/MultitaskDockView.swift
           grep -Fq 'systemGestureLastTranslation' LiveContainer-3.8.0/MultitaskSupport/MultitaskDockView.swift
-          if grep -Fq 'let height = max(54, window.safeAreaInsets.bottom + 36)' LiveContainer-3.8.0/MultitaskSupport/MultitaskDockView.swift; then
-            echo "Gesture surface still overlaps the physical iOS Home edge" >&2
-            exit 1
-          fi
 
           # Guest-originated switcher presentation must demote LiveContainer's
           # UIKit host so SwiftUI's ContainerSwitcherView can actually appear.
@@ -99,7 +99,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "4189828+github-actions[bot]@users.noreply.github.com"
           git add -- "${FILES[@]}"
-          git commit -m "Persist Vibe guest switcher layer fix [skip ci]"
+          git commit -m "Persist guest switcher fix and restore bottom bar [skip ci]"
           git push origin HEAD:main
 
       - name: Show toolchain
@@ -178,13 +178,13 @@ jobs:
           grep -Eqi 'platform[[:space:]]+(IOS|2)' "$RUNNER_TEMP/vtool.txt"
 
           # A green compile is not enough: prove the framework inside the IPA
-          # actually contains the host-owned gesture and guest switcher runtime.
+          # actually contains the working-position gesture and guest switcher fix.
           strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: host bottom gesture surface installed'
           strings "$LC_FRAMEWORK" | grep -F 'VibeContainers.SystemGestureSurface'
           strings "$LC_FRAMEWORK" | grep -F 'per-window bottom grabber disabled; host owns bottom gestures'
           strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: FORCED virtual-window guest host'
           strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: rebound guest UIView'
-          strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: app-owned bottom gesture strip'
+          strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: guest gesture bar restored to working bottom position'
           strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: bottom gesture cancelled; using cached translation'
           strings "$LC_FRAMEWORK" | grep -F 'VibeContainers: guest host demoted below SwiftUI switcher'
           strings "$LC_FRAMEWORK" | grep -F 'hiding guest surfaces registered='

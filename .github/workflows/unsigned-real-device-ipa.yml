@@ -56,13 +56,29 @@ jobs:
       - name: Build unsigned physical-device IPA
         shell: bash
         run: |
-          set -euo pipefail
+          set -o pipefail
           chmod +x scripts/build_ipa.sh scripts/prepare_dependencies.sh
           scripts/build_ipa.sh \
             --unsigned \
             --configuration Release \
             --derived-data "$RUNNER_TEMP/VibeContainersDerivedData" \
-            --output "$RUNNER_TEMP/VibeContainers-unsigned-real-device.ipa"
+            --output "$RUNNER_TEMP/VibeContainers-unsigned-real-device.ipa" \
+            2>&1 | tee "$RUNNER_TEMP/vibecontainers-build.log"
+          status=${PIPESTATUS[0]}
+          grep -E '(^|[[:space:]])(error:|fatal error:)|BUILD FAILED|Command .* failed|The following build commands failed' \
+            "$RUNNER_TEMP/vibecontainers-build.log" | tail -n 250 > "$RUNNER_TEMP/vibecontainers-build-errors.txt" || true
+          exit "$status"
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: VibeContainers-build-diagnostics
+          path: |
+            ${{ runner.temp }}/vibecontainers-build.log
+            ${{ runner.temp }}/vibecontainers-build-errors.txt
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Validate device payload and unsigned state
         shell: bash

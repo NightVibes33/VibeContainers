@@ -159,6 +159,9 @@ class AppInfoProvider {
     /// Set only while the bottom gesture explicitly exposes the existing
     /// multitasking dock on a phone. Normal launches stay edge-to-edge.
     private var gestureDockOverride = false
+    /// Tracks whether a guest owns the screen so every later UIKit hierarchy
+    /// raise can restore the app-target gesture host above the guest surface.
+    private var isSystemGestureSurfaceVisible = false
     /// Full-width host-owned bottom edge. Unlike a recognizer attached
     /// to a guest window, this remains reachable for maximized and
     /// windowed virtual guests and cannot be swallowed by the remote scene.
@@ -420,6 +423,9 @@ class AppInfoProvider {
            let dockSuperview = dockView.superview {
             dockSuperview.bringSubviewToFront(dockView)
         }
+        if isSystemGestureSurfaceVisible {
+            publishSystemGestureSurfaceVisibility(true)
+        }
     }
 
     private func attachDockController(
@@ -679,6 +685,14 @@ class AppInfoProvider {
 
     private func setSystemGestureSurfaceVisible(_ visible: Bool) {
         dispatchPrecondition(condition: .onQueue(.main))
+        isSystemGestureSurfaceVisible = visible
+        publishSystemGestureSurfaceVisibility(visible)
+    }
+
+    /// Queue after the current hierarchy transaction. This is deliberately
+    /// reusable from raiseHostedSurfaces(): showing the dock or refocusing a
+    /// guest must not leave the guest above the bottom-control hit surface.
+    private func publishSystemGestureSurfaceVisibility(_ visible: Bool) {
         var info: [String: Any] = ["visible": visible]
         if let window = keyWindow {
             info["window"] = window

@@ -32,14 +32,15 @@ jobs:
         with:
           xcode-version: '26.2'
 
-      - name: Apply installer fixes
+      - name: Apply source fixes
         shell: bash
         run: |
           set -euo pipefail
           python3 scripts/apply_installer_fixes.py
           python3 scripts/apply_installer_followups.py
+          python3 scripts/apply_xcode26_fixes.py
 
-      - name: Persist installer fixes to main
+      - name: Persist source fixes to main
         shell: bash
         run: |
           set -euo pipefail
@@ -49,15 +50,18 @@ jobs:
             iOSSim/Apps/PackagesView.swift
             iOSSim/Apps/GuestContainerView.swift
             iOSSim/Model/ZipArchive.swift
+            iOSSim/Apps/SettingsIcons.swift
+            iOSSim/Springboard/PageTransition.swift
+            iOSSim/Springboard/SpringboardView.swift
           )
           if git diff --quiet -- "${FILES[@]}"; then
-            echo "Installer source already contains the fixes."
+            echo "Source already contains the fixes."
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -- "${FILES[@]}"
-          git commit -m "Fix IPA import and source install pipeline [skip ci]"
+          git commit -m "Fix IPA pipeline and Xcode 26.2 build [skip ci]"
           git push origin HEAD:main
 
       - name: Show toolchain

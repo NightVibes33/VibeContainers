@@ -20,7 +20,7 @@ NyxPhone includes a TrollStore-style workspace that is private to the host app.
 It uses VibeContainers' real IPA extractor, per-app containers, Mach-O
 preparation, entitlement mediation, JIT/JIT-less signing, and launch lifecycle.
 It can import, persist, launch, remove, and export supported decrypted arm64
-IPAs. A source-built `NyxValidation.ipa` is embedded in every CI artifact so the
+IPAs and TIPAs. A source-built `NyxValidation.ipa` is embedded in every CI artifact so the
 same install path can be exercised without an external download.
 
 The workspace is informed by the pinned `34306/vphone-aio` guest image and
@@ -31,3 +31,8 @@ launcher provenance without copying the 12 GB image into this repository.
 This does not register TrollStore or guest apps with the physical device's
 Apple SpringBoard. Physical-device installation of the unsigned NyxPhone IPA
 still requires an authorized signing/install method.
+
+`TrollStoreCompatibilityBridge` implements TrollStore's `install`, `uninstall`,
+and `open` command boundary using private VibeContainers app containers. It
+replaces the upstream root-persona helper and SpringBoard registration calls,
+which are unavailable to a normally sideloaded host application.

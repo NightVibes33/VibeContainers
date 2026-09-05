@@ -13,6 +13,7 @@ import UniformTypeIdentifiers
 struct NyxianTrollStoreWorkspace: View {
     @State private var packageStore = PackageStore.shared
     @State private var installer = GuestInstaller.shared
+    private let trollStoreBridge = TrollStoreCompatibilityBridge.shared
     @State private var importingIPA = false
     @State private var noticeTitle = "Nyxian TrollStore ready"
     @State private var noticeDetail = "Import a decrypted arm64 IPA or install the embedded validation app."
@@ -73,7 +74,7 @@ struct NyxianTrollStoreWorkspace: View {
                                     .buttonStyle(.bordered)
                                 Spacer()
                                 Button(role: .destructive) {
-                                    packageStore.remove(app.bundleIdentifier)
+                                    Task { _ = await trollStoreBridge.execute(.uninstall(app.bundleIdentifier)) }
                                     noticeTitle = "App removed"
                                     noticeDetail = "\(app.name) and its NyxPhone container were removed."
                                 } label: {
@@ -140,32 +141,23 @@ struct NyxianTrollStoreWorkspace: View {
     private func install(_ url: URL, source: String) async {
         noticeTitle = "Installing"
         noticeDetail = source
-        await installer.installIPA(at: url)
-        switch installer.sideload {
-        case .installed(let bundleIdentifier):
+        let result = await trollStoreBridge.execute(.install(url))
+        if result.succeeded {
             noticeTitle = "Installed"
-            noticeDetail = "\(bundleIdentifier) is persistent and ready for launch."
-        case .failed(let message):
+            noticeDetail = "\(result.message) is persistent and ready for launch."
+        } else {
             noticeTitle = "Install failed"
-            noticeDetail = message
-        default:
-            noticeTitle = "Install incomplete"
-            noticeDetail = "The installer returned without a final state."
+            noticeDetail = result.message
         }
     }
 
     private func launch(_ app: PackageStore.InstalledApp) {
-        guard let container = GuestContainerStore.shared.container(for: app.bundleIdentifier) else {
-            noticeTitle = "Container missing"
-            noticeDetail = "Reinstall \(app.name) to recreate its container."
-            return
-        }
         noticeTitle = "Launching"
         noticeDetail = app.name
         Task {
-            let outcome = await installer.launch(container)
-            noticeTitle = outcome.headline
-            noticeDetail = outcome.detail
+            let result = await trollStoreBridge.execute(.open(app.bundleIdentifier))
+            noticeTitle = result.succeeded ? "Launched" : "Launch failed"
+            noticeDetail = result.message
         }
     }
 

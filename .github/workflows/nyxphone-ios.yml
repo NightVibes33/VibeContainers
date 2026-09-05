@@ -693,8 +693,12 @@ jobs:
           grep -Fq 'allowedContentTypes: [.item]' iOSSim/Apps/PackagesView.swift
           grep -Fq 'ext == "ipa" || ext == "tipa"' iOSSim/Apps/PackagesView.swift
           grep -Fq 'await installer.installIPA(at: url)' iOSSim/Apps/PackagesView.swift
-          grep -Fq 'let outcome = await installer.launch(container)' iOSSim/Apps/NyxianTrollStoreWorkspace.swift
-          grep -Fq 'packageStore.remove(app.bundleIdentifier)' iOSSim/Apps/NyxianTrollStoreWorkspace.swift
+          grep -Fq 'case install(URL)' iOSSim/Model/TrollStoreCompatibilityBridge.swift
+          grep -Fq 'case uninstall(String)' iOSSim/Model/TrollStoreCompatibilityBridge.swift
+          grep -Fq 'case open(String)' iOSSim/Model/TrollStoreCompatibilityBridge.swift
+          grep -Fq 'trollStoreBridge.execute(.install(url))' iOSSim/Apps/NyxianTrollStoreWorkspace.swift
+          grep -Fq 'trollStoreBridge.execute(.open(app.bundleIdentifier))' iOSSim/Apps/NyxianTrollStoreWorkspace.swift
+          grep -Fq 'trollStoreBridge.execute(.uninstall(app.bundleIdentifier))' iOSSim/Apps/NyxianTrollStoreWorkspace.swift
 
       - name: Build ViPhone native runtime for iphoneos
         shell: bash

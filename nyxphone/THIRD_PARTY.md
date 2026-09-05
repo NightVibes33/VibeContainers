@@ -28,3 +28,12 @@
 - Source: https://github.com/34306/vphone-aio
 - Commit: `1db79dccd95391d6247c41f3cc4eac523567f295`
 - Purpose: reference distribution only; no prebuilt archive is imported.
+
+## TrollStore command contract
+
+- Source: https://github.com/opa334/TrollStore
+- Commit: `88424f683b2a08f34a3f88985f790f97d84ce1df`
+- License: BSD-3-Clause
+- Purpose: authoritative install/uninstall/open helper command semantics.
+- Integration: no privileged binary is copied; the compatible command boundary
+  is implemented against VibeContainers' private guest runtime.

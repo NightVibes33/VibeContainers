@@ -28,6 +28,11 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
+      - name: Select Xcode 26.2
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '26.2'
+
       - name: Fetch pinned Nyxian and vphone-cli donors
         shell: bash
         run: |
@@ -634,6 +639,11 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
+      - name: Select Xcode 26.2
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '26.2'
+
       - name: Download verified built-in Nyxian guest
         uses: actions/download-artifact@v4
         with:
@@ -678,6 +688,13 @@ jobs:
           python3 scripts/apply_exact_appwindow_guest_control_v10.py
           python3 scripts/apply_home_layout_persistence.py
           git diff --exit-code -- iOSSim LiveContainer-3.8.0
+          grep -Fq 'case photos, calculator, clock, reminders, mail, notes, camera, settings, trollStore' iOSSim/Model/MockApp.swift
+          grep -Fq 'static let pages: [[AppID]] = [[.trollStore, .settings]]' iOSSim/Model/MockApp.swift
+          grep -Fq 'allowedContentTypes: [.item]' iOSSim/Apps/PackagesView.swift
+          grep -Fq 'ext == "ipa" || ext == "tipa"' iOSSim/Apps/PackagesView.swift
+          grep -Fq 'await installer.installIPA(at: url)' iOSSim/Apps/PackagesView.swift
+          grep -Fq 'let outcome = await installer.launch(container)' iOSSim/Apps/NyxianTrollStoreWorkspace.swift
+          grep -Fq 'packageStore.remove(app.bundleIdentifier)' iOSSim/Apps/NyxianTrollStoreWorkspace.swift
 
       - name: Build ViPhone native runtime for iphoneos
         shell: bash

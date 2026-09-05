@@ -563,10 +563,18 @@ private struct InstalledTab: View {
         }
         .fileImporter(
             isPresented: $picking,
-            allowedContentTypes: [UTType(filenameExtension: "ipa") ?? .data, .zip]
+            // TrollStore .tipa files are IPA ZIPs, but Files providers do not
+            // consistently declare either extension's UTType. Permit picking
+            // an item here and validate the archive extension before install.
+            allowedContentTypes: [.item]
         ) { result in
             switch result {
             case .success(let url):
+                let ext = url.pathExtension.lowercased()
+                guard ext == "ipa" || ext == "tipa" else {
+                    installer.reportUnsupportedSideloadExtension(ext)
+                    return
+                }
                 Task { await installer.installIPA(at: url) }
             case .failure(let error):
                 Task { @MainActor in installer.clearSideload() }

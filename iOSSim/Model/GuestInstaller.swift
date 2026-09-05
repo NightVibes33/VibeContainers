@@ -207,6 +207,11 @@ final class GuestInstaller {
 
     func clearSideload() { sideload = .idle }
 
+    func reportUnsupportedSideloadExtension(_ fileExtension: String) {
+        let shown = fileExtension.isEmpty ? "unknown" : ".\(fileExtension)"
+        sideload = .failed("Unsupported \(shown) file. Choose a decrypted .ipa or .tipa archive.")
+    }
+
     func phase(for bundle: String) -> Phase { phases[bundle] ?? .idle }
     func isBusy(_ bundle: String) -> Bool { activeInstalls.contains(bundle) }
 

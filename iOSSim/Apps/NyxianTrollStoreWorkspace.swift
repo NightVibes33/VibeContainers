@@ -110,9 +110,10 @@ struct NyxianTrollStoreWorkspace: View {
             allowsMultipleSelection: false
         ) { result in
             guard case .success(let urls) = result, let url = urls.first else { return }
-            guard url.pathExtension.lowercased() == "ipa" else {
+            let ext = url.pathExtension.lowercased()
+            guard ext == "ipa" || ext == "tipa" else {
                 noticeTitle = "Unsupported file"
-                noticeDetail = "Choose an .ipa archive."
+                noticeDetail = "Choose a decrypted .ipa or .tipa archive."
                 return
             }
             Task { await install(url, source: "Imported file") }

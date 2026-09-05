@@ -73,6 +73,14 @@ jobs:
           grep -Fq '@objc private func handleGuestBottomPan' LiveContainer-3.8.0/MultitaskSupport/MultitaskDockView.swift
           grep -Fq 'container.isUserInteractionEnabled = false' iOSSim/Model/RunningContainerStore.swift
 
+          # The preinstalled TrollStore surface must remain wired to the same
+          # audited installer, persistent containers, and launch implementation.
+          grep -Fq 'case photos, calculator, clock, reminders, mail, notes, camera, settings, trollStore' iOSSim/Model/MockApp.swift
+          grep -Fq 'static let pages: [[AppID]] = [[.trollStore, .settings]]' iOSSim/Model/MockApp.swift
+          grep -Fq 'allowedContentTypes: [.item]' iOSSim/Apps/PackagesView.swift
+          grep -Fq 'ext == "ipa" || ext == "tipa"' iOSSim/Apps/PackagesView.swift
+          grep -Fq 'await installer.installIPA(at: url)' iOSSim/Apps/PackagesView.swift
+
           # LiveContainer owns guest lifecycle only. It must not draw/classify a
           # second bar; it merely tells the app-target control when to appear.
           grep -Fq 'IOSSimGuestSpringboardControlVisibility' LiveContainer-3.8.0/MultitaskSupport/MultitaskDockView.swift

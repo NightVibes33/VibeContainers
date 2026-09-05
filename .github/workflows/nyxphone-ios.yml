@@ -707,6 +707,7 @@ jobs:
           mkdir -p "$VALIDATION/Payload/NyxValidation.app"
           xcrun --sdk iphoneos swiftc \
             -target arm64-apple-ios17.0 -sdk "$SDK" -O \
+            -parse-as-library \
             -emit-executable "$ROOT/Validation/NyxValidationApp.swift" \
             -o "$VALIDATION/Payload/NyxValidation.app/NyxValidation"
           cp "$ROOT/Validation/NyxValidation-Info.plist" \

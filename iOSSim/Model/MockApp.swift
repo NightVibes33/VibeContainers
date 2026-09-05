@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum AppID: String, CaseIterable, Identifiable, Hashable {
-    case photos, calculator, clock, reminders, mail, notes, camera, settings
+    case photos, calculator, clock, reminders, mail, notes, camera, settings, trollStore
     case weather, calendar, stocks, maps
     case phone, safari, messages, music
 
@@ -17,6 +17,7 @@ enum AppID: String, CaseIterable, Identifiable, Hashable {
         case .notes: "Notes"
         case .camera: "Camera"
         case .settings: "Settings"
+        case .trollStore: "TrollStore"
         case .weather: "Weather"
         case .calendar: "Calendar"
         case .stocks: "Stocks"
@@ -56,6 +57,7 @@ enum AppID: String, CaseIterable, Identifiable, Hashable {
                        .init("Record Video", "video", .cameraVideo)]
         case .settings: [.init("Customization", "slider.horizontal.3", .settingsCustomization),
                          .init("★ Applications", "folder", .settingsPackages)]
+        case .trollStore: []
         case .weather: [.init("My Location", "location", .weatherMyLocation)]
         case .calendar: [.init("New Event", "plus.circle", .calendarNewEvent)]
         case .stocks: [.init("Watchlist", "list.bullet", .stocksWatchlist)]
@@ -84,6 +86,7 @@ enum AppID: String, CaseIterable, Identifiable, Hashable {
         case .notes: AnyView(NotesApp())
         case .camera: AnyView(CameraApp())
         case .settings: AnyView(SettingsApp())
+        case .trollStore: AnyView(TrollStoreApp())
         case .weather: AnyView(WeatherApp())
         case .calendar: AnyView(CalendarApp())
         case .stocks: AnyView(StocksApp())
@@ -100,7 +103,7 @@ enum HomeLayout {
     /// The simulator starts as an empty device. The other built-in app
     /// implementations stay available to the project, but are not installed
     /// into a new home-screen layout.
-    static let pages: [[AppID]] = [[.settings]]
+    static let pages: [[AppID]] = [[.trollStore, .settings]]
 
     static let dock: [AppID] = []
 

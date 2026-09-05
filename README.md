@@ -1,5 +1,17 @@
 # VibeContainers
 
+## NyxPhone integration
+
+The built-in TrollStore app reuses VibeContainers' existing package browser,
+IPA extractor, persistent per-app containers, signing, tweak preparation, and
+guest launcher. The additive `nyxphone/` runtime integrates pinned Nyxian,
+vphone-cli, and vphone-aio provenance without replacing the current
+VibeContainers app or guest-control implementations. CI embeds a source-built
+arm64 `NyxValidation.ipa` for install-path validation.
+
+The TrollStore workspace is private to VibeContainers/NyxPhone. It does not
+register apps with the physical device's Apple SpringBoard.
+
 VibeContainers is an experimental iPhone and iPad host with an iOS-style shell and an embedded [LiveContainer](https://github.com/LiveContainer/LiveContainer) runtime for importing and running guest apps. It is not an emulator or a security boundary: guest apps run inside the host and may be able to access other guest data.
 
 ## Requirements

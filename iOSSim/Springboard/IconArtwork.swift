@@ -55,6 +55,8 @@ struct IconArtwork: View {
                     endRadius: 46 * unit
                 )
             }
+        case .trollStore:
+            gradient("57D878", "14883B")
         case .weather:
             gradient("5AB4FF", "1D5FA8")
         case .calendar:
@@ -106,6 +108,11 @@ struct IconArtwork: View {
 
         case .settings:
             GearGlyph().frame(width: 46 * unit, height: 46 * unit)
+
+        case .trollStore:
+            Image(systemName: "checkmark.shield.fill")
+                .font(.system(size: 32 * unit, weight: .bold))
+                .foregroundStyle(.white)
 
         case .weather:
             WeatherGlyph().frame(width: 44 * unit, height: 38 * unit)

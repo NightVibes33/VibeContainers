@@ -11,6 +11,8 @@ import ImageIO
 /// public JSON shape. `IndependenceNotice` says so at the bottom of every tab.
 struct PackagesView: View {
     var onBack: () -> Void
+    var rootTitle = "★ Applications"
+    var rootBackTitle = "Settings"
 
     @State private var store = PackageStore.shared
     @State private var tab = 0
@@ -95,13 +97,13 @@ struct PackagesView: View {
         case .source(let id): store.sources.first { $0.id == id }?.displayName ?? "Source"
         case .app(let id): store.entry(id: id)?.app.name ?? "App"
         case .guest(let bundle): store.installed[bundle]?.name ?? "LiveContainer"
-        case nil: tab == 0 ? "★ Applications" : Self.tabs[tab].title
+        case nil: tab == 0 ? rootTitle : Self.tabs[tab].title
         }
     }
 
     private var backTitle: String {
         switch stack.count {
-        case 0: "Settings"
+        case 0: rootBackTitle
         case 1: Self.tabs[tab].title
         default: "Back"
         }

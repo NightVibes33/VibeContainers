@@ -1,0 +1,875 @@
+name: iOS NyxPhone Runtime
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'nyxphone/**'
+      - 'iOSSim/**'
+      - 'LiveContainer-3.8.0/**'
+      - 'scripts/**'
+      - '.github/workflows/nyxphone-ios.yml'
+
+permissions:
+  contents: read
+
+env:
+  NYXIAN_SHA: 7488333d32aab81fa01437968bfdef7bde1771f4
+  VPHONE_CLI_SHA: 2af884b56c4d9044cdfad8ac94f034ec767d0fb3
+  VPHONE_AIO_SHA: 1db79dccd95391d6247c41f3cc4eac523567f295
+
+jobs:
+  runtime-core:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Fetch pinned Nyxian and vphone-cli donors
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none https://github.com/emexlab/Nyxian.git "$RUNNER_TEMP/Nyxian"
+          git -C "$RUNNER_TEMP/Nyxian" checkout "$NYXIAN_SHA"
+          test "$(git -C "$RUNNER_TEMP/Nyxian" rev-parse HEAD)" = "$NYXIAN_SHA"
+
+          git clone --filter=blob:none https://github.com/Lakr233/vphone-cli.git "$RUNNER_TEMP/vphone-cli"
+          git -C "$RUNNER_TEMP/vphone-cli" checkout "$VPHONE_CLI_SHA"
+          test "$(git -C "$RUNNER_TEMP/vphone-cli" rev-parse HEAD)" = "$VPHONE_CLI_SHA"
+          test -f "$RUNNER_TEMP/vphone-cli/scripts/cfw_install_jb.sh"
+          test -f "$RUNNER_TEMP/vphone-cli/scripts/cfw_install.sh"
+          test -f "$RUNNER_TEMP/vphone-cli/research/iboot_patches.md"
+          test -f "$RUNNER_TEMP/vphone-cli/research/kernel_jb_patch_notes.md"
+          grep -q 'MIT License' "$RUNNER_TEMP/vphone-cli/LICENSE"
+
+      - name: Build freestanding Nyxian guest entry image
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$GITHUB_WORKSPACE/nyxphone"
+          mkdir -p "$RUNNER_TEMP/viphone-ios"
+          xcrun --sdk iphoneos clang \
+            -target arm64-apple-ios17.0 \
+            -c "$ROOT/Kernel/NyxianGuest/NyxianEntry.S" \
+            -o "$RUNNER_TEMP/viphone-ios/nyxian-entry.o"
+          file "$RUNNER_TEMP/viphone-ios/nyxian-entry.o" | tee "$RUNNER_TEMP/viphone-ios/nyxian-entry-file.txt"
+          file "$RUNNER_TEMP/viphone-ios/nyxian-entry.o" | grep -qi arm64
+          python3 "$ROOT/Tools/extract_macho_section.py" \
+            "$RUNNER_TEMP/viphone-ios/nyxian-entry.o" __text \
+            "$RUNNER_TEMP/viphone-ios/nyxian-entry.bin"
+          test -s "$RUNNER_TEMP/viphone-ios/nyxian-entry.bin"
+
+      - name: Native memory CPU kernel-surface and Apple boot-image self-test
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$GITHUB_WORKSPACE/nyxphone"
+          NYX="$RUNNER_TEMP/Nyxian"
+          cat > "$RUNNER_TEMP/runtime-smoke.c" <<'EOF'
+          #include "VPhoneRuntimeCore.h"
+          #include "VPhoneAArch64.h"
+          #include "VPhoneKernelSurface.h"
+          #include "VPhoneHostRuntime.h"
+          #include "NyxRuntime.h"
+          #include <fcntl.h>
+          #include <errno.h>
+          #include <stdint.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <unistd.h>
+          #include <string.h>
+
+          static uint32_t movz_x(unsigned rd, unsigned imm16) {
+              return 0xD2800000u | ((imm16 & 0xFFFFu) << 5) | (rd & 31u);
+          }
+          static uint32_t add_x_imm(unsigned rd, unsigned rn, unsigned imm12) {
+              return 0x91000000u | ((imm12 & 0xFFFu) << 10) | ((rn & 31u) << 5) | (rd & 31u);
+          }
+          static uint32_t str_x(unsigned rt, unsigned rn, unsigned imm12_scaled) {
+              return 0xF9000000u | ((imm12_scaled & 0xFFFu) << 10) | ((rn & 31u) << 5) | (rt & 31u);
+          }
+          static uint32_t ldr_x(unsigned rt, unsigned rn, unsigned imm12_scaled) {
+              return 0xF9400000u | ((imm12_scaled & 0xFFFu) << 10) | ((rn & 31u) << 5) | (rt & 31u);
+          }
+          static void put32(uint8_t *p, uint32_t value) { memcpy(p, &value, sizeof(value)); }
+          static void put64(uint8_t *p, uint64_t value) { memcpy(p, &value, sizeof(value)); }
+          typedef struct { const uint8_t *bytes; size_t length; } Backing;
+          static VPStatus backing_read(uint64_t offset, void *dst, size_t length, void *context) {
+              Backing *backing = (Backing *)context;
+              if (!backing || offset > backing->length || length > backing->length - offset) {
+                  return VP_STATUS_ADDRESS_OUT_OF_RANGE;
+              }
+              memcpy(dst, backing->bytes + offset, length);
+              return VP_STATUS_OK;
+          }
+          typedef struct { char bytes[2048]; size_t length; } SerialCapture;
+          static void capture_serial(const uint8_t *bytes, size_t length, void *context) {
+              SerialCapture *capture = (SerialCapture *)context;
+              if (!capture) return;
+              size_t available = sizeof(capture->bytes) - 1u - capture->length;
+              if (length > available) length = available;
+              if (length) memcpy(capture->bytes + capture->length, bytes, length);
+              capture->length += length; capture->bytes[capture->length] = 0;
+          }
+
+          int main(void) {
+              if (strcmp(nyx_runtime_version(), "NyxRuntime/0.19-dyld-bit-operations") != 0) return 9;
+              VPMachineConfig cfg = {8, 32ULL * 1024 * 1024 * 1024, 1290, 2796, 460, 3.0};
+              VPRuntime *rt = vp_runtime_create(&cfg);
+              if (!rt) return 10;
+              VPKernelSurface *surface = vp_ksurface_attach(rt);
+              if (!surface) return 11;
+              SerialCapture syscall_capture = {0};
+              const uint64_t unknown_args[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+              uint64_t unknown_result = 0;
+              vp_runtime_set_serial_callback(rt, capture_serial, &syscall_capture);
+              vp_ksurface_set_process_name(surface, "launchd");
+              if (vp_ksurface_handle_syscall(rt, UINT64_C(0xFFFF), unknown_args, &unknown_result, surface) != VP_STATUS_OK ||
+                  unknown_result != (uint64_t)(int64_t)-ENOSYS ||
+                  !strstr(syscall_capture.bytes, "process=launchd number=65535") ||
+                  !strstr(syscall_capture.bytes, "arguments=1,2,3,4,5,6,7,8")) return 80;
+              vp_ksurface_set_process_name(surface, "nyxinit");
+              vp_runtime_set_serial_callback(rt, NULL, NULL);
+
+              const uint64_t path_address = 0x18000;
+              uint64_t procpath_args[8] = {path_address, 128, 0, 0, 0, 0, 0, 0};
+              uint64_t procpath_result = 0;
+              if (vp_ksurface_set_process_path(surface, "/sbin/nyxinit") != VP_STATUS_OK ||
+                  vp_ksurface_handle_syscall(rt, VP_NYX_SYS_PROCPATH, procpath_args,
+                                             &procpath_result, surface) != VP_STATUS_OK ||
+                  procpath_result != strlen("/sbin/nyxinit")) return 119;
+              char procpath[32] = {0};
+              if (vp_runtime_memory_read(rt, path_address, procpath, sizeof(procpath)) != VP_STATUS_OK ||
+                  strcmp(procpath, "/sbin/nyxinit") != 0) return 120;
+              uint64_t sign_args[8] = {0x20000, 4096, 0, 0, 0, 0, 0, 0};
+              uint64_t sign_result = 0;
+              if (vp_ksurface_handle_syscall(rt, VP_NYX_SYS_SIGN, sign_args,
+                                             &sign_result, surface) != VP_STATUS_OK ||
+                  (int64_t)sign_result != -EPERM) return 121;
+              if (vp_ksurface_grant_entitlement(surface, "com.nyxphone.virtual-signing") != VP_STATUS_OK ||
+                  !vp_ksurface_has_entitlement(surface, "com.nyxphone.virtual-signing") ||
+                  vp_ksurface_handle_syscall(rt, VP_NYX_SYS_SIGN, sign_args,
+                                             &sign_result, surface) != VP_STATUS_OK ||
+                  sign_result != 0) return 122;
+
+              uint8_t backing_bytes[VP_GUEST_PAGE_SIZE * 2u];
+              for (size_t i = 0; i < sizeof(backing_bytes); i++) backing_bytes[i] = (uint8_t)(i * 17u + 3u);
+              Backing backing = {backing_bytes, sizeof(backing_bytes)};
+              const uint64_t backing_address = 0x6000000;
+              if (vp_runtime_map_readonly_backing(
+                      rt, backing_address, sizeof(backing_bytes), 0, backing_read, &backing
+                  ) != VP_STATUS_OK) return 44;
+              const uint64_t pages_before_cow = vp_runtime_committed_pages(rt);
+              uint8_t backing_check[32] = {0};
+              if (vp_runtime_memory_read(rt, backing_address + 9, backing_check, sizeof(backing_check)) != VP_STATUS_OK ||
+                  memcmp(backing_check, backing_bytes + 9, sizeof(backing_check)) != 0 ||
+                  vp_runtime_committed_pages(rt) != pages_before_cow) return 45;
+              const uint8_t replacement = 0xa5;
+              if (vp_runtime_memory_write(rt, backing_address + 17, &replacement, 1) != VP_STATUS_OK ||
+                  vp_runtime_committed_pages(rt) != pages_before_cow + 1) return 46;
+              memset(backing_check, 0, sizeof(backing_check));
+              if (vp_runtime_memory_read(rt, backing_address + 9, backing_check, sizeof(backing_check)) != VP_STATUS_OK ||
+                  backing_check[8] != replacement || backing_check[7] != backing_bytes[16] ||
+                  backing_check[9] != backing_bytes[18]) return 47;
+
+              uint8_t macho[0x240] = {0};
+              put32(macho, 0xfeedfacf);
+              put32(macho + 4, 0x0100000c);
+              put32(macho + 12, 2);
+              put32(macho + 16, 5);
+              put32(macho + 20, 200);
+              size_t mc = 32;
+              put32(macho + mc, 0x19); put32(macho + mc + 4, 72);
+              memcpy(macho + mc + 8, "__TEXT", 6);
+              put64(macho + mc + 24, 0x1000000); put64(macho + mc + 32, 0x4000);
+              put64(macho + mc + 40, 0); put64(macho + mc + 48, 0x200); mc += 72;
+              put32(macho + mc, 0x80000028); put32(macho + mc + 4, 24);
+              put64(macho + mc + 8, 0x180); mc += 24;
+              put32(macho + mc, 0x0e); put32(macho + mc + 4, 32); put32(macho + mc + 8, 12);
+              memcpy(macho + mc + 12, "/usr/lib/dyld", 14); mc += 32;
+              put32(macho + mc, 0x0c); put32(macho + mc + 4, 56); put32(macho + mc + 8, 24);
+              memcpy(macho + mc + 24, "/usr/lib/libSystem.B.dylib", 27); mc += 56;
+              put32(macho + mc, 0x1d); put32(macho + mc + 4, 16);
+              put32(macho + mc + 8, 0x220); put32(macho + mc + 12, 0x20);
+              macho[0x180] = 0x1f; macho[0x181] = 0x20; macho[0x182] = 0x03; macho[0x183] = 0xd5;
+              VPMachOImageInfo macho_info;
+              if (vp_runtime_load_macho(rt, macho, sizeof(macho), 0x2000000, &macho_info) != VP_STATUS_OK) return 41;
+              if (macho_info.entry_address != 0x3000180 || macho_info.segment_count != 1 ||
+                  macho_info.dylib_count != 1 || strcmp(macho_info.dylinker_path, "/usr/lib/dyld") != 0) return 42;
+              uint8_t entry_check[4] = {0};
+              if (vp_runtime_memory_read(rt, macho_info.entry_address, entry_check, sizeof(entry_check)) != VP_STATUS_OK ||
+                  memcmp(entry_check, macho + 0x180, sizeof(entry_check)) != 0) return 43;
+
+              uint8_t dyld[0x440] = {0};
+              put32(dyld, 0xfeedfacf); put32(dyld + 4, 0x0100000c); put32(dyld + 12, 7);
+              put32(dyld + 16, 3); put32(dyld + 20, 376);
+              size_t dc = 32;
+              put32(dyld + dc, 0x19); put32(dyld + dc + 4, 72);
+              memcpy(dyld + dc + 8, "__TEXT", 6); put64(dyld + dc + 24, 0);
+              put64(dyld + dc + 32, 0x4000); put64(dyld + dc + 40, 0);
+              put64(dyld + dc + 48, 0x400); dc += 72;
+              put32(dyld + dc, 0x05); put32(dyld + dc + 4, 288);
+              put32(dyld + dc + 8, 6); put32(dyld + dc + 12, 68);
+              put64(dyld + dc + 272, 0x200); dc += 288;
+              put32(dyld + dc, 0x1d); put32(dyld + dc + 4, 16);
+              put32(dyld + dc + 8, 0x420); put32(dyld + dc + 12, 0x20);
+              dyld[0x200] = 0x1f; dyld[0x201] = 0x20; dyld[0x202] = 0x03; dyld[0x203] = 0xd5;
+              VPMachOImageInfo dyld_info;
+              if (vp_runtime_load_macho(rt, dyld, sizeof(dyld), 0x9000000, &dyld_info) != VP_STATUS_OK ||
+                  dyld_info.file_type != 7 || dyld_info.entry_address != 0x9000200) return 52;
+              VPDarwinProcessBootstrap process_bootstrap;
+              if (vp_runtime_prepare_darwin_process(
+                      rt, dyld_info.entry_address, 0xA000000, "/sbin/launchd", &process_bootstrap
+                  ) != VP_STATUS_OK || process_bootstrap.argc != 1 ||
+                  (process_bootstrap.stack_pointer & 15u) != 0) return 53;
+              uint64_t process_vectors[8] = {0};
+              if (vp_runtime_memory_read(
+                      rt, process_bootstrap.stack_pointer, process_vectors, sizeof(process_vectors)
+                  ) != VP_STATUS_OK || process_vectors[0] != 1 || process_vectors[1] == 0 ||
+                  process_vectors[2] != 0 || process_vectors[3] == 0 || process_vectors[4] != 0) return 54;
+              char launchd_path[14] = {0};
+              if (vp_runtime_memory_read(rt, process_vectors[1], launchd_path, sizeof(launchd_path)) != VP_STATUS_OK ||
+                  strcmp(launchd_path, "/sbin/launchd") != 0) return 55;
+
+              uint8_t zero[32];
+              memset(zero, 0xAA, sizeof(zero));
+              if (vp_runtime_memory_read(rt, 0x1000, zero, sizeof(zero)) != VP_STATUS_OK) return 12;
+              for (size_t i = 0; i < sizeof(zero); i++) if (zero[i] != 0) return 13;
+
+              const uint64_t code_base = 0x20000;
+              const uint32_t program[] = {
+                  movz_x(0, 0x1234),
+                  add_x_imm(1, 0, 5),
+                  str_x(1, 31, 0),
+                  ldr_x(2, 31, 0),
+                  movz_x(16, VP_DARWIN_SYS_GETPID),
+                  0xD4000001u,
+                  0xD503201Fu,
+                  0xD4400000u,
+              };
+              const uint8_t dtree[] = {0x44,0x54,0x52,0x45,0x45};
+              const uint8_t trust[] = {0x54,0x52,0x55,0x53,0x54};
+              const uint8_t ramdisk[] = {0x52,0x41,0x4d,0x44,0x49,0x53,0x4b};
+              VPBootImageLayout boot = {
+                  .iboot = {program, sizeof(program), code_base},
+                  .kernelcache = {NULL, 0, 0},
+                  .device_tree = {dtree, sizeof(dtree), 0x30000},
+                  .trust_cache = {trust, sizeof(trust), 0x40000},
+                  .ramdisk = {ramdisk, sizeof(ramdisk), 0x50000},
+                  .entry_address = code_base,
+              };
+              if (vp_runtime_stage_boot_images(rt, &boot) != VP_STATUS_OK) return 14;
+              if (vp_runtime_boot_vector(rt) != code_base) return 15;
+              uint8_t dtree_check[sizeof(dtree)] = {0};
+              if (vp_runtime_memory_read(rt, 0x30000, dtree_check, sizeof(dtree_check)) != VP_STATUS_OK) return 16;
+              if (memcmp(dtree, dtree_check, sizeof(dtree)) != 0) return 17;
+
+              VPAArch64CPU cpu;
+              vp_aarch64_reset(&cpu, code_base);
+              cpu.sp = 0x60000;
+              for (unsigned i = 0; i < 8; i++) {
+                  VPCPUStepResult r = vp_aarch64_step(rt, &cpu, NULL);
+                  if (i < 7 && r != VP_CPU_STEP_OK) return 20 + (int)i;
+                  if (i == 7 && r != VP_CPU_STEP_HALTED) return 30;
+              }
+              if (cpu.x[1] != 0x1239 || cpu.x[2] != 0x1239) return 31;
+              if (cpu.x[0] != 1 || cpu.syscalls_retired != 1) return 32;
+              if (vp_ksurface_syscalls_handled(surface) != 3) return 33;
+
+              const uint64_t dyld_cpu_base = 0xB0000;
+              const uint32_t dyld_cpu_program[] = {
+                  0xD503233Fu,       /* PACIASP */
+                  0xA9BF7BFDu,       /* STP X29, X30, [SP, #-16]! */
+                  0x910003FDu,       /* MOV X29, SP */
+                  0xD28000A0u,       /* MOVZ X0, #5 */
+                  0xD28000E1u,       /* MOVZ X1, #7 */
+                  0x8B010002u,       /* ADD X2, X0, X1 */
+                  0xF100305Fu,       /* CMP X2, #12 */
+                  0x54000040u,       /* B.EQ +8 */
+                  0xD29BD5A3u,       /* MOVZ X3, #0xDEAD (skipped) */
+                  0xD2824683u,       /* MOVZ X3, #0x1234 */
+                  0x9A810006u,       /* CSEL X6, X0, X1, EQ */
+                  0x9A811407u,       /* CSINC X7, X0, X1, NE */
+                  0x9B017C08u,       /* MUL X8, X0, X1 */
+                  0x390043E3u,       /* STRB W3, [SP, #16] */
+                  0x394043E4u,       /* LDRB W4, [SP, #16] */
+                  0xF84003E5u,       /* LDUR X5, [SP] */
+                  0xA8C17BFDu,       /* LDP X29, X30, [SP], #16 */
+                  0xD50323BFu,       /* AUTIASP */
+                  0xD4400000u,       /* HLT #0 */
+              };
+              if (vp_runtime_memory_write(
+                      rt, dyld_cpu_base, dyld_cpu_program, sizeof(dyld_cpu_program)
+                  ) != VP_STATUS_OK) return 57;
+              VPAArch64CPU dyld_cpu;
+              vp_aarch64_reset(&dyld_cpu, dyld_cpu_base);
+              dyld_cpu.sp = 0x80000; dyld_cpu.x[29] = 0xAAAA; dyld_cpu.x[30] = 0xBBBB;
+              for (unsigned i = 0; i < 18; i++) {
+                  const VPCPUStepResult step = vp_aarch64_step(rt, &dyld_cpu, NULL);
+                  if (i < 17 && step != VP_CPU_STEP_OK) return 58 + (int)i;
+                  if (i == 17 && step != VP_CPU_STEP_HALTED) return 76;
+              }
+              if (dyld_cpu.x[2] != 12 || dyld_cpu.x[3] != 0x1234 || dyld_cpu.x[4] != 0x34 ||
+                  dyld_cpu.x[5] != 0xAAAA || dyld_cpu.x[6] != 5 || dyld_cpu.x[7] != 8 ||
+                  dyld_cpu.x[8] != 35 || dyld_cpu.x[29] != 0xAAAA || dyld_cpu.x[30] != 0xBBBB ||
+                  dyld_cpu.sp != 0x80000 || ((dyld_cpu.sys.nzcv >> 30) & 1u) != 1u) return 77;
+
+              const uint64_t bitfield_cpu_base = 0x520000;
+              const uint64_t bitfield_data = bitfield_cpu_base + 32;
+              const uint32_t bitfield_program[] = {
+                  0xB9800001u,       /* LDRSW X1, [X0] */
+                  0x93407C22u,       /* SXTW X2, W1 */
+                  0x53001C23u,       /* UXTB W3, W1 */
+                  0xD344FC24u,       /* LSR X4, X1, immediate 4 */
+                  0x531D7065u,       /* LSL W5, W3, immediate 3 */
+                  0xB8800006u,       /* LDURSW X6, [X0] */
+                  0x98000047u,       /* LDRSW X7, literal plus 8 */
+                  0xD4400000u,       /* HLT 0 */
+                  0xFFFFFF80u,       /* signed word test data */
+              };
+              if (vp_runtime_memory_write(rt, bitfield_cpu_base, bitfield_program, sizeof(bitfield_program)) != VP_STATUS_OK) return 81;
+              VPAArch64CPU bitfield_cpu;
+              vp_aarch64_reset(&bitfield_cpu, bitfield_cpu_base);
+              bitfield_cpu.x[0] = bitfield_data;
+              for (unsigned i = 0; i < 8; i++) {
+                  const VPCPUStepResult step = vp_aarch64_step(rt, &bitfield_cpu, NULL);
+                  if (i < 7 && step != VP_CPU_STEP_OK) return 82 + (int)i;
+                  if (i == 7 && step != VP_CPU_STEP_HALTED) return 89;
+              }
+              if (bitfield_cpu.x[1] != UINT64_C(0xFFFFFFFFFFFFFF80) ||
+                  bitfield_cpu.x[2] != UINT64_C(0xFFFFFFFFFFFFFF80) || bitfield_cpu.x[3] != 0x80 ||
+                  bitfield_cpu.x[4] != UINT64_C(0x0FFFFFFFFFFFFFF8) || bitfield_cpu.x[5] != 0x400 ||
+                  bitfield_cpu.x[6] != UINT64_C(0xFFFFFFFFFFFFFF80) ||
+                  bitfield_cpu.x[7] != UINT64_C(0xFFFFFFFFFFFFFF80)) return 90;
+
+              const uint64_t two_source_cpu_base = 0x540000;
+              const uint32_t two_source_program[] = {
+                  0x9AC10804u,       /* UDIV X4, X0, X1 */
+                  0x9AC10C65u,       /* SDIV X5, X3, X1 */
+                  0x9AC72026u,       /* LSLV X6, X1, X7 */
+                  0x9AC72408u,       /* LSRV X8, X0, X7 */
+                  0x9AC72869u,       /* ASRV X9, X3, X7 */
+                  0x9AC72C0Au,       /* RORV X10, X0, X7 */
+                  0x9ADF080Bu,       /* UDIV X11, X0, XZR */
+                  0xD4400000u,       /* HLT 0 */
+              };
+              if (vp_runtime_memory_write(rt, two_source_cpu_base, two_source_program, sizeof(two_source_program)) != VP_STATUS_OK) return 91;
+              VPAArch64CPU two_source_cpu;
+              vp_aarch64_reset(&two_source_cpu, two_source_cpu_base);
+              two_source_cpu.x[0] = 100; two_source_cpu.x[1] = 7;
+              two_source_cpu.x[3] = (uint64_t)(int64_t)-100; two_source_cpu.x[7] = 3;
+              for (unsigned i = 0; i < 8; i++) {
+                  const VPCPUStepResult step = vp_aarch64_step(rt, &two_source_cpu, NULL);
+                  if (i < 7 && step != VP_CPU_STEP_OK) return 92 + (int)i;
+                  if (i == 7 && step != VP_CPU_STEP_HALTED) return 99;
+              }
+              if (two_source_cpu.x[4] != 14 || two_source_cpu.x[5] != (uint64_t)(int64_t)-14 ||
+                  two_source_cpu.x[6] != 56 || two_source_cpu.x[8] != 12 ||
+                  two_source_cpu.x[9] != (uint64_t)(int64_t)-13 ||
+                  two_source_cpu.x[10] != UINT64_C(0x800000000000000C) || two_source_cpu.x[11] != 0) return 100;
+
+              const uint64_t indexing_cpu_base = 0x560000;
+              const uint64_t indexing_data_base = 0x570000;
+              const uint32_t indexing_program[] = {
+                  0x8B214804u,       /* ADD X4, X0, W1, UXTW, shift 2 */
+                  0xCB23C805u,       /* SUB X5, X0, W3, SXTW, shift 2 */
+                  0xB8215802u,       /* STR W2, [X0, W1, UXTW, shift 2] */
+                  0xB8615806u,       /* LDR W6, [X0, W1, UXTW, shift 2] */
+                  0xF8217802u,       /* STR X2, [X0, X1, LSL, shift 3] */
+                  0xF8617807u,       /* LDR X7, [X0, X1, LSL, shift 3] */
+                  0xD4400000u,       /* HLT 0 */
+              };
+              const uint8_t indexing_data[64] = {0};
+              if (vp_runtime_memory_write(rt, indexing_cpu_base, indexing_program, sizeof(indexing_program)) != VP_STATUS_OK ||
+                  vp_runtime_memory_write(rt, indexing_data_base, indexing_data, sizeof(indexing_data)) != VP_STATUS_OK) return 101;
+              VPAArch64CPU indexing_cpu;
+              vp_aarch64_reset(&indexing_cpu, indexing_cpu_base);
+              indexing_cpu.x[0] = indexing_data_base; indexing_cpu.x[1] = 3;
+              indexing_cpu.x[2] = UINT64_C(0x11223344); indexing_cpu.x[3] = UINT64_C(0xFFFFFFFF);
+              for (unsigned i = 0; i < 7; i++) {
+                  const VPCPUStepResult step = vp_aarch64_step(rt, &indexing_cpu, NULL);
+                  if (i < 6 && step != VP_CPU_STEP_OK) return 102 + (int)i;
+                  if (i == 6 && step != VP_CPU_STEP_HALTED) return 108;
+              }
+              if (indexing_cpu.x[4] != indexing_data_base + 12 || indexing_cpu.x[5] != indexing_data_base + 4 ||
+                  indexing_cpu.x[6] != UINT64_C(0x11223344) || indexing_cpu.x[7] != UINT64_C(0x11223344)) return 109;
+
+              const uint64_t logical_imm_cpu_base = 0x580000;
+              const uint32_t logical_imm_program[] = {
+                  0xB2401FE4u,       /* ORR X4, XZR, immediate 0xFF */
+                  0x92401C05u,       /* AND X5, X0, immediate 0xFF */
+                  0xD27C0C86u,       /* EOR X6, X4, immediate 0xF0 */
+                  0xF2401C07u,       /* ANDS X7, X0, immediate 0xFF */
+                  0xF2401FE8u,       /* ANDS X8, XZR, immediate 0xFF */
+                  0x32001FE9u,       /* ORR W9, WZR, immediate 0xFF */
+                  0xD4400000u,       /* HLT 0 */
+              };
+              if (vp_runtime_memory_write(rt, logical_imm_cpu_base, logical_imm_program, sizeof(logical_imm_program)) != VP_STATUS_OK) return 110;
+              VPAArch64CPU logical_imm_cpu;
+              vp_aarch64_reset(&logical_imm_cpu, logical_imm_cpu_base);
+              logical_imm_cpu.x[0] = UINT64_C(0x1234);
+              for (unsigned i = 0; i < 7; i++) {
+                  const VPCPUStepResult step = vp_aarch64_step(rt, &logical_imm_cpu, NULL);
+                  if (i < 6 && step != VP_CPU_STEP_OK) return 111 + (int)i;
+                  if (i == 6 && step != VP_CPU_STEP_HALTED) return 117;
+              }
+              if (logical_imm_cpu.x[4] != 0xFF || logical_imm_cpu.x[5] != 0x34 ||
+                  logical_imm_cpu.x[6] != 0x0F || logical_imm_cpu.x[7] != 0x34 ||
+                  logical_imm_cpu.x[8] != 0 || logical_imm_cpu.x[9] != 0xFF ||
+                  ((logical_imm_cpu.sys.nzcv >> 30) & 1u) != 1u) return 118;
+
+              const uint64_t bit_ops_cpu_base = 0x5A0000;
+              const uint32_t bit_ops_program[] = {
+                  0x93C22023u,       /* EXTR X3, X1, X2, #8 */
+                  0xDAC00004u,       /* RBIT X4, X0 */
+                  0xDAC00C25u,       /* REV X5, X1 */
+                  0xDAC01046u,       /* CLZ X6, X2 */
+                  0xDAC01467u,       /* CLS X7, X3 */
+                  0x93C12028u,       /* ROR X8, X1, #8 */
+                  0xD4400000u,       /* HLT 0 */
+              };
+              if (vp_runtime_memory_write(rt, bit_ops_cpu_base, bit_ops_program,
+                                          sizeof(bit_ops_program)) != VP_STATUS_OK) return 123;
+              VPAArch64CPU bit_ops_cpu;
+              vp_aarch64_reset(&bit_ops_cpu, bit_ops_cpu_base);
+              bit_ops_cpu.x[0] = 1;
+              bit_ops_cpu.x[1] = UINT64_C(0x1122334455667788);
+              bit_ops_cpu.x[2] = UINT64_C(0x99AABBCCDDEEFF00);
+              for (unsigned i = 0; i < 7; i++) {
+                  const VPCPUStepResult step = vp_aarch64_step(rt, &bit_ops_cpu, NULL);
+                  if (i < 6 && step != VP_CPU_STEP_OK) return 124 + (int)i;
+                  if (i == 6 && step != VP_CPU_STEP_HALTED) return 130;
+              }
+              if (bit_ops_cpu.x[3] != UINT64_C(0x8899AABBCCDDEEFF) ||
+                  bit_ops_cpu.x[4] != UINT64_C(0x8000000000000000) ||
+                  bit_ops_cpu.x[5] != UINT64_C(0x8877665544332211) ||
+                  bit_ops_cpu.x[6] != 0 || bit_ops_cpu.x[7] != 0 ||
+                  bit_ops_cpu.x[8] != UINT64_C(0x8811223344556677)) return 131;
+
+              if (vp_runtime_boot(rt) != VP_STATUS_OK) return 34;
+              if (vp_runtime_state(rt) != VP_RUNTIME_STOPPED) return 35;
+              if (vp_runtime_instructions_retired(rt) != 8) return 36;
+              if (vp_ksurface_syscalls_handled(surface) != 4) return 37;
+
+              printf("ABI=%u boot-stage=ok retired=%llu ksurface=%llu committed=%llu\n",
+                     vp_runtime_abi_version(),
+                     (unsigned long long)vp_runtime_instructions_retired(rt),
+                     (unsigned long long)vp_ksurface_syscalls_handled(surface),
+                     (unsigned long long)vp_runtime_committed_bytes(rt));
+              vp_ksurface_destroy(surface);
+              vp_runtime_destroy(rt);
+
+              char cache_path[] = "/tmp/viphone-dyld-cache-XXXXXX";
+              int cache_fd = mkstemp(cache_path);
+              if (cache_fd < 0) return 48;
+              uint8_t cache[VP_GUEST_PAGE_SIZE] = {0};
+              memcpy(cache, "dyld_v1  arm64e", 16);
+              put32(cache + 16, 0x100); put32(cache + 20, 1);
+              put64(cache + 0x100, 0x7000000);
+              put64(cache + 0x108, VP_GUEST_PAGE_SIZE);
+              put64(cache + 0x110, 0);
+              put32(cache + 0x118, 5); put32(cache + 0x11c, 5);
+              if (write(cache_fd, cache, sizeof(cache)) != (ssize_t)sizeof(cache) || close(cache_fd) != 0) return 49;
+              NyxVMConfig nyx_cfg = {1, 16ULL * 1024 * 1024 * 1024, 1290, 2796, 460, 3.0};
+              NyxVM *cache_vm = nyx_vm_create(&nyx_cfg);
+              if (!cache_vm) return 50;
+              uint32_t cache_mappings = 0;
+              uint64_t cache_bytes = 0;
+              if (nyx_vm_map_dyld_cache(cache_vm, cache_path, &cache_mappings, &cache_bytes) != 0 ||
+                  cache_mappings != 1 || cache_bytes != VP_GUEST_PAGE_SIZE) return 51;
+              char diagnostic_check[1024] = {0};
+              size_t diagnostic_length = 0;
+              if (nyx_vm_copy_diagnostics(
+                      cache_vm, diagnostic_check, sizeof(diagnostic_check), &diagnostic_length
+                  ) != 0 || diagnostic_length == 0 ||
+                  !strstr(diagnostic_check, "[NYXDYLD] shared cache demand-mapped")) return 56;
+              nyx_vm_destroy(cache_vm);
+              unlink(cache_path);
+
+              VPMachineConfig fault_cfg = {1, 1024 * 1024, 1, 1, 1, 1.0};
+              VPRuntime *fault_rt = vp_runtime_create(&fault_cfg);
+              if (!fault_rt) return 78;
+              VPKernelSurface *fault_surface = vp_ksurface_attach(fault_rt);
+              SerialCapture fault_capture = {0};
+              vp_runtime_set_serial_callback(fault_rt, capture_serial, &fault_capture);
+              if (!fault_surface || vp_runtime_set_boot_vector(fault_rt, 0x1000) != VP_STATUS_OK ||
+                  vp_runtime_boot(fault_rt) != VP_STATUS_EXECUTION_FAULT ||
+                  !strstr(fault_capture.bytes, "NYX_CPU_FAULT:") ||
+                  !strstr(fault_capture.bytes, "x30=0x")) return 79;
+              vp_ksurface_destroy(fault_surface);
+              vp_runtime_destroy(fault_rt);
+              return 0;
+          }
+          EOF
+
+          clang -std=c11 -Wall -Wextra -Werror \
+            -I "$ROOT/Runtime/Core" -I "$ROOT/Runtime/include" -I "$NYX" \
+            "$ROOT/Runtime/Core/VPhoneRuntimeCore.c" \
+            "$ROOT/Runtime/Core/VPhoneAArch64.c" \
+            "$ROOT/Runtime/Core/VPhoneKernelSurface.c" \
+            "$ROOT/Runtime/Core/VPhoneHostRuntime.c" \
+            "$ROOT/Runtime/Core/VPhoneNyxianCompat.c" \
+            "$ROOT/Runtime/Core/NyxRuntime.c" \
+            "$RUNNER_TEMP/runtime-smoke.c" \
+            -framework CoreFoundation -framework CFNetwork \
+            -o "$RUNNER_TEMP/runtime-smoke"
+          "$RUNNER_TEMP/runtime-smoke"
+
+      - name: Execute freestanding Nyxian entry in NyxRuntime
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$GITHUB_WORKSPACE/nyxphone"
+          NYX="$RUNNER_TEMP/Nyxian"
+          clang -std=c11 -Wall -Wextra -Werror \
+            -I "$ROOT/Runtime/Core" -I "$ROOT/Runtime/include" -I "$NYX" \
+            "$ROOT/Runtime/Core/VPhoneRuntimeCore.c" \
+            "$ROOT/Runtime/Core/VPhoneAArch64.c" \
+            "$ROOT/Runtime/Core/VPhoneKernelSurface.c" \
+            "$ROOT/Runtime/Core/NyxRuntime.c" \
+            "$ROOT/Tests/nyxian_kernel_entry_test.c" \
+            -framework CoreFoundation -framework CFNetwork \
+            -o "$RUNNER_TEMP/viphone-ios/nyxian-kernel-entry-test"
+          "$RUNNER_TEMP/viphone-ios/nyxian-kernel-entry-test" \
+            "$RUNNER_TEMP/viphone-ios/nyxian-entry.bin" \
+            | tee "$RUNNER_TEMP/viphone-ios/nyxian-kernel-entry.log"
+          grep -F "[NYXRT] runtime initialized" "$RUNNER_TEMP/viphone-ios/nyxian-kernel-entry.log"
+          grep -F "[NYXRT] Nyxian loaded" "$RUNNER_TEMP/viphone-ios/nyxian-kernel-entry.log"
+          grep -F "[NYXIAN] kernel entry reached" "$RUNNER_TEMP/viphone-ios/nyxian-kernel-entry.log"
+          grep -F "[NYXDISPLAY] first frame" "$RUNNER_TEMP/viphone-ios/nyxian-kernel-entry.log"
+          grep -F "[NYXTOUCH] event delivered" "$RUNNER_TEMP/viphone-ios/nyxian-kernel-entry.log"
+          grep -F "[NYXSTORAGE] root mounted" "$RUNNER_TEMP/viphone-ios/nyxian-kernel-entry.log"
+          grep -F "[NYXSTORAGE] persistence verified across VM recreation" "$RUNNER_TEMP/viphone-ios/nyxian-kernel-entry.log"
+          grep -F "[NYXNET] HTTPS request complete" "$RUNNER_TEMP/viphone-ios/nyxian-kernel-entry.log"
+          grep -F "[NYXDARWIN] basic ABI passed" "$RUNNER_TEMP/viphone-ios/nyxian-kernel-entry.log"
+          grep -F "[NYXMACH] IPC roundtrip passed" "$RUNNER_TEMP/viphone-ios/nyxian-kernel-entry.log"
+          grep -F "[NYXDARWIN] nyxinit started" "$RUNNER_TEMP/viphone-ios/nyxian-kernel-entry.log"
+          grep -F "hello from Nyxian userspace" "$RUNNER_TEMP/viphone-ios/nyxian-kernel-entry.log"
+
+      - name: Compile custom native core for real iPhone and iPad
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$GITHUB_WORKSPACE/nyxphone"
+          NYX="$RUNNER_TEMP/Nyxian"
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          mkdir -p "$RUNNER_TEMP/viphone-ios"
+          for SRC in VPhoneRuntimeCore VPhoneAArch64 VPhoneKernelSurface VPhoneHostRuntime VPhoneNyxianCompat NyxRuntime; do
+            xcrun --sdk iphoneos clang \
+              -target arm64-apple-ios17.0 -isysroot "$SDK" \
+              -std=c11 -Wall -Wextra -Werror -O2 \
+              -I "$ROOT/Runtime/Core" -I "$ROOT/Runtime/include" -I "$NYX" \
+              -c "$ROOT/Runtime/Core/$SRC.c" \
+              -o "$RUNNER_TEMP/viphone-ios/$SRC.o"
+          done
+          xcrun ar rcs "$RUNNER_TEMP/viphone-ios/libViPhoneRuntime.a" "$RUNNER_TEMP/viphone-ios/"*.o
+          xcrun nm "$RUNNER_TEMP/viphone-ios/libViPhoneRuntime.a" | grep '_vp_runtime_boot'
+          xcrun nm "$RUNNER_TEMP/viphone-ios/libViPhoneRuntime.a" | grep '_vp_runtime_stage_boot_images'
+          xcrun nm "$RUNNER_TEMP/viphone-ios/libViPhoneRuntime.a" | grep '_vp_runtime_load_macho'
+          xcrun nm "$RUNNER_TEMP/viphone-ios/libViPhoneRuntime.a" | grep '_vp_runtime_map_readonly_backing'
+          xcrun nm "$RUNNER_TEMP/viphone-ios/libViPhoneRuntime.a" | grep '_nyx_vm_map_dyld_cache'
+          xcrun nm "$RUNNER_TEMP/viphone-ios/libViPhoneRuntime.a" | grep '_vp_runtime_prepare_darwin_process'
+          xcrun nm "$RUNNER_TEMP/viphone-ios/libViPhoneRuntime.a" | grep '_nyx_vm_start_launchd'
+          xcrun nm "$RUNNER_TEMP/viphone-ios/libViPhoneRuntime.a" | grep '_nyx_vm_copy_diagnostics'
+          xcrun nm "$RUNNER_TEMP/viphone-ios/libViPhoneRuntime.a" | grep '_nyx_vm_load_macho'
+          xcrun nm "$RUNNER_TEMP/viphone-ios/libViPhoneRuntime.a" | grep '_vp_host_runtime_start'
+          xcrun nm "$RUNNER_TEMP/viphone-ios/libViPhoneRuntime.a" | grep '_nyx_runtime_version'
+          xcrun nm "$RUNNER_TEMP/viphone-ios/libViPhoneRuntime.a" | grep '_nyx_vm_boot_kernel_device'
+          xcrun nm "$RUNNER_TEMP/viphone-ios/libViPhoneRuntime.a" | grep '_vp_runtime_copy_framebuffer'
+          xcrun nm "$RUNNER_TEMP/viphone-ios/libViPhoneRuntime.a" | grep '_nyx_vm_touch_capture_frame'
+          xcrun nm "$RUNNER_TEMP/viphone-ios/libViPhoneRuntime.a" | grep '_nyx_vm_boot_kernel_device_storage'
+          xcrun nm "$RUNNER_TEMP/viphone-ios/libViPhoneRuntime.a" | grep '_vp_runtime_network_https_get'
+
+          cat > "$RUNNER_TEMP/viphone-ios/provenance.txt" <<EOF
+          VibeContainers=$GITHUB_SHA
+          Nyxian=$NYXIAN_SHA
+          vphone-cli=$VPHONE_CLI_SHA
+          runtime-branch=$GITHUB_SHA
+          runtime-abi=14
+          core-abi=20
+          execution=ViPhone-custom-aarch64
+          apple-boot-staging=vp_runtime_stage_boot_images
+          qemu=none
+          virtualization-framework=none
+          EOF
+
+      - name: Typecheck Swift virtual-phone session for iphoneos
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$GITHUB_WORKSPACE/nyxphone"
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun swiftc \
+            -parse-as-library \
+            -target arm64-apple-ios17.0 \
+            -sdk "$SDK" \
+            -I "$ROOT/Runtime/Core" \
+            -Xcc -fmodule-map-file="$ROOT/Runtime/Core/module.modulemap" \
+            -module-name VPhoneHost \
+            -emit-module \
+            -emit-module-path "$RUNNER_TEMP/viphone-ios/VPhoneHost.swiftmodule" \
+            "$ROOT/HostIntegration/"*.swift
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: viphone-ios-runtime-core
+          path: ${{ runner.temp }}/viphone-ios
+          if-no-files-found: error
+
+  viphone-ipa:
+    runs-on: macos-15
+    needs: runtime-core
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Download verified built-in Nyxian guest
+        uses: actions/download-artifact@v4
+        with:
+          name: viphone-ios-runtime-core
+          path: ${{ runner.temp }}/viphone-built-in-guest
+
+      - name: Fetch pinned VibeContainers Nyxian and vphone-cli sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git submodule update --init --recursive
+          scripts/prepare_dependencies.sh
+
+          git clone --filter=blob:none https://github.com/emexlab/Nyxian.git "$RUNNER_TEMP/Nyxian"
+          git -C "$RUNNER_TEMP/Nyxian" checkout "$NYXIAN_SHA"
+          git clone --filter=blob:none https://github.com/Lakr233/vphone-cli.git "$RUNNER_TEMP/vphone-cli"
+          git -C "$RUNNER_TEMP/vphone-cli" checkout "$VPHONE_CLI_SHA"
+          test -f "$RUNNER_TEMP/vphone-cli/scripts/cfw_install_jb.sh"
+          test -f "$RUNNER_TEMP/vphone-cli/research/iboot_patches.md"
+
+          # vphone-aio stores its prebuilt guest in seven huge archive parts.
+          # Fetch only its small authoritative launcher/README blobs so CI
+          # verifies provenance without silently redistributing that image.
+          git init "$RUNNER_TEMP/vphone-aio"
+          git -C "$RUNNER_TEMP/vphone-aio" remote add origin https://github.com/34306/vphone-aio.git
+          git -C "$RUNNER_TEMP/vphone-aio" fetch --depth=1 --filter=blob:none origin "$VPHONE_AIO_SHA"
+          test "$(git -C "$RUNNER_TEMP/vphone-aio" rev-parse FETCH_HEAD)" = "$VPHONE_AIO_SHA"
+          git -C "$RUNNER_TEMP/vphone-aio" show "$VPHONE_AIO_SHA:README.md" > "$RUNNER_TEMP/vphone-aio-README.md"
+          git -C "$RUNNER_TEMP/vphone-aio" show "$VPHONE_AIO_SHA:vphone-aio.sh" > "$RUNNER_TEMP/vphone-aio.sh"
+          grep -q 'already jailbroken with full bootstrap installed' "$RUNNER_TEMP/vphone-aio-README.md"
+          grep -q './boot.sh' "$RUNNER_TEMP/vphone-aio.sh"
+
+      - name: Apply pinned VibeContainers host build fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/apply_installer_fixes.py
+          python3 scripts/apply_installer_followups.py
+          python3 scripts/apply_xcode26_fixes.py
+          python3 scripts/apply_virtual_host_lock.py
+          python3 scripts/apply_exact_appwindow_guest_control_v10.py
+          python3 scripts/apply_home_layout_persistence.py
+          git diff --exit-code -- iOSSim LiveContainer-3.8.0
+
+      - name: Build ViPhone native runtime for iphoneos
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$GITHUB_WORKSPACE/nyxphone"
+          NYX="$RUNNER_TEMP/Nyxian"
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          mkdir -p "$GITHUB_WORKSPACE/build-viphone"
+          for SRC in VPhoneRuntimeCore VPhoneAArch64 VPhoneKernelSurface VPhoneHostRuntime VPhoneNyxianCompat NyxRuntime; do
+            xcrun --sdk iphoneos clang \
+              -target arm64-apple-ios17.0 -isysroot "$SDK" -O2 \
+              -std=c11 -Wall -Wextra -Werror \
+              -I "$ROOT/Runtime/Core" -I "$ROOT/Runtime/include" -I "$NYX" \
+              -c "$ROOT/Runtime/Core/$SRC.c" \
+              -o "$GITHUB_WORKSPACE/build-viphone/$SRC.o"
+          done
+          xcrun ar rcs "$GITHUB_WORKSPACE/build-viphone/libViPhoneRuntime.a" "$GITHUB_WORKSPACE/build-viphone/"*.o
+
+      - name: Build embedded Nyxian TrollStore validation IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$GITHUB_WORKSPACE/nyxphone"
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          VALIDATION="$GITHUB_WORKSPACE/build-validation"
+          mkdir -p "$VALIDATION/Payload/NyxValidation.app"
+          xcrun --sdk iphoneos swiftc \
+            -target arm64-apple-ios17.0 -sdk "$SDK" -O \
+            -emit-executable "$ROOT/Validation/NyxValidationApp.swift" \
+            -o "$VALIDATION/Payload/NyxValidation.app/NyxValidation"
+          cp "$ROOT/Validation/NyxValidation-Info.plist" \
+            "$VALIDATION/Payload/NyxValidation.app/Info.plist"
+          file "$VALIDATION/Payload/NyxValidation.app/NyxValidation" | grep -qi 'Mach-O 64-bit executable arm64'
+          /usr/bin/plutil -lint "$VALIDATION/Payload/NyxValidation.app/Info.plist"
+          (cd "$VALIDATION" && /usr/bin/zip -qry NyxValidation.ipa Payload)
+          unzip -t "$VALIDATION/NyxValidation.ipa" >/dev/null
+          shasum -a 256 "$VALIDATION/NyxValidation.ipa" | tee "$RUNNER_TEMP/NyxValidation.sha256"
+
+      - name: Merge ViPhone runtime into current VibeContainers host
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$GITHUB_WORKSPACE/nyxphone"
+          mkdir -p iOSSim/Runtime/ViPhone
+          cp "$ROOT/HostIntegration/"*.swift iOSSim/Runtime/ViPhone/
+
+          python3 <<'PY'
+          from pathlib import Path
+          p = Path('iOSSim/iOSSimApp.swift')
+          s = p.read_text()
+          marker = 'import LiveContainerSwiftUI\n'
+          decl = '''import LiveContainerSwiftUI\n\n@_silgen_name("vp_host_runtime_start")\nprivate func ViPhoneRuntimeStart() -> Int32\n\n@_silgen_name("vp_host_runtime_abi")\nprivate func ViPhoneRuntimeABI() -> UInt32\n\n@_silgen_name("vp_host_runtime_state")\nprivate func ViPhoneRuntimeState() -> UInt32\n'''
+          if 'ViPhoneRuntimeStart' not in s:
+              s = s.replace(marker, decl, 1)
+          needle = 'func IOSSimHostMain() -> Int32 {\n'
+          inject = '''func IOSSimHostMain() -> Int32 {\n    let vibePhoneStatus = ViPhoneRuntimeStart()\n    NSLog("ViPhone: custom runtime start=%d ABI=%u state=%u", vibePhoneStatus, ViPhoneRuntimeABI(), ViPhoneRuntimeState())\n'''
+          if 'custom runtime start=' not in s:
+              s = s.replace(needle, inject, 1)
+          p.write_text(s)
+          PY
+
+      - name: Build complete unsigned real-device NyxPhone IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$GITHUB_WORKSPACE/nyxphone"
+          LIB="$GITHUB_WORKSPACE/build-viphone/libViPhoneRuntime.a"
+          xcodebuild \
+            -project iOSSim.xcodeproj \
+            -scheme iOSSim \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$GITHUB_WORKSPACE/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY= \
+            DEVELOPMENT_TEAM= \
+            SWIFT_INCLUDE_PATHS="$ROOT/Runtime/Core $ROOT/Runtime/include" \
+            'OTHER_SWIFT_FLAGS=$(inherited) -Xcc -fmodule-map-file='"$ROOT"'/Runtime/Core/module.modulemap -Xcc -I'"$ROOT"'/Runtime/Core -Xcc -I'"$ROOT"'/Runtime/include' \
+            'OTHER_LDFLAGS=$(inherited) -framework CFNetwork -Wl,-u,_nyx_runtime_version -Wl,-force_load,'"$LIB" \
+            build
+
+          APP="$(find "$GITHUB_WORKSPACE/DerivedData/Build/Products/Release-iphoneos" -maxdepth 1 -name '*.app' -type d | head -1)"
+          test -n "$APP"
+          BUILTIN_GUEST="$(find "$RUNNER_TEMP/viphone-built-in-guest" -name nyxian-entry.bin -type f | head -1)"
+          test -s "$BUILTIN_GUEST"
+          mkdir -p "$APP/NyxPhoneGuest"
+          cp "$BUILTIN_GUEST" "$APP/NyxPhoneGuest/Nyxian.bin"
+          cp "$GITHUB_WORKSPACE/build-validation/NyxValidation.ipa" "$APP/NyxPhoneGuest/NyxValidation.ipa"
+          test -s "$APP/NyxPhoneGuest/Nyxian.bin"
+          test -s "$APP/NyxPhoneGuest/NyxValidation.ipa"
+          EXE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")"
+          mv "$APP/$EXE" "$APP/NyxPhone"
+          EXE=NyxPhone
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable NyxPhone' "$APP/Info.plist"
+          file "$APP/$EXE" | tee "$RUNNER_TEMP/viphone-device-binary.txt"
+          file "$APP/$EXE" | grep -qi arm64
+          /usr/bin/plutil -p "$APP/Info.plist" | tee "$RUNNER_TEMP/viphone-info-plist.txt"
+          grep -q 'iPhoneOS' "$RUNNER_TEMP/viphone-info-plist.txt"
+          if grep -q 'iPhoneSimulator' "$RUNNER_TEMP/viphone-info-plist.txt"; then exit 1; fi
+          xcrun nm "$APP/$EXE" | grep '_vp_runtime_boot'
+          xcrun nm "$APP/$EXE" | grep '_vp_runtime_stage_boot_images'
+          xcrun nm "$APP/$EXE" | grep '_vp_runtime_load_macho'
+          xcrun nm "$APP/$EXE" | grep '_vp_runtime_map_readonly_backing'
+          xcrun nm "$APP/$EXE" | grep '_nyx_vm_map_dyld_cache'
+          xcrun nm "$APP/$EXE" | grep '_vp_runtime_prepare_darwin_process'
+          xcrun nm "$APP/$EXE" | grep '_nyx_vm_start_launchd'
+          xcrun nm "$APP/$EXE" | grep '_nyx_vm_copy_diagnostics'
+          xcrun nm "$APP/$EXE" | grep '_nyx_vm_load_macho'
+          xcrun nm "$APP/$EXE" | grep '_vp_aarch64_step'
+          xcrun nm "$APP/$EXE" | grep '_vp_host_runtime_start'
+          xcrun nm "$APP/$EXE" | grep '_nyx_runtime_version'
+          xcrun nm "$APP/$EXE" | grep '_nyx_vm_boot_kernel_device'
+          xcrun nm "$APP/$EXE" | grep '_vp_runtime_copy_framebuffer'
+          xcrun nm "$APP/$EXE" | grep '_nyx_vm_touch_capture_frame'
+          xcrun nm "$APP/$EXE" | grep '_nyx_vm_boot_kernel_device_storage'
+          xcrun nm "$APP/$EXE" | grep '_vp_runtime_network_https_get'
+
+          if find "$APP" -iname '*qemu*' -print -quit | grep -q .; then
+            echo 'QEMU payload detected; refusing NyxPhone IPA' >&2
+            exit 1
+          fi
+
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleDisplayName NyxPhone' "$APP/Info.plist" 2>/dev/null || \
+            /usr/libexec/PlistBuddy -c 'Add :CFBundleDisplayName string NyxPhone' "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleName NyxPhone' "$APP/Info.plist" 2>/dev/null || true
+
+          cat > "$APP/NyxPhoneRuntime.json" <<EOF
+          {
+            "product": "NyxPhone",
+            "host": "VibeContainers",
+            "hostCommit": "$GITHUB_SHA",
+            "nyxianCommit": "$NYXIAN_SHA",
+            "bootAndCFWDonor": "Lakr233/vphone-cli",
+            "vphoneCliCommit": "$VPHONE_CLI_SHA",
+            "vphoneAioCommit": "$VPHONE_AIO_SHA",
+            "runtimeABI": 14,
+            "coreABI": 20,
+            "execution": "NyxPhone custom AArch64 runtime",
+            "appleBootImageStaging": true,
+            "builtInNyxianEmbedded": true,
+            "builtInNyxinitEL0": true,
+            "builtInFramebuffer": true,
+            "builtInTouch": true,
+            "builtInStorage": true,
+            "persistentDisk": "Application Support/NyxPhone/VMs/default/disk/disk.img",
+            "builtInNetworking": true,
+            "networkTransport": "CFNetwork HTTPS",
+            "networkTestEndpoint": "https://example.com/",
+            "builtInDarwinABI": true,
+            "builtInMachIPC": true,
+            "builtInProcessPath": true,
+            "virtualSigningEntitlementMediation": true,
+            "nyxianTrollStoreWorkspace": true,
+            "nyxianTrollStorePhysicalSpringBoardInstall": false,
+            "embeddedValidationIPA": "NyxPhoneGuest/NyxValidation.ipa",
+            "appManagement": ["install", "persist", "launch", "remove", "export"],
+            "hostCodeSigningPerformed": false,
+            "builtInMachOLoader": true,
+            "builtInDyldCacheDemandPaging": true,
+            "builtInDyldMachOLoader": true,
+            "builtInDarwinInitialStack": true,
+            "builtInDyldEntryAttempt": true,
+            "builtInDyldCPUInstructions": ["PAC-hints", "STP-LDP", "ADDS-SUBS", "B.cond", "logical-register", "LDUR-STUR", "LDR-literal", "CSEL-CSINC", "MADD-MSUB", "SBFM-UBFM", "LDRSW-LDURSW", "UDIV-SDIV", "LSLV-LSRV-ASRV-RORV", "ADD-SUB-extended", "LDR-STR-register-offset", "logical-immediate", "EXTR-ROR", "RBIT-REV", "CLZ-CLS"],
+            "builtInDeviceDiagnostics": true,
+            "builtInDeviceDiagnosticShare": true,
+            "cpuFaultMarker": "NYX_CPU_FAULT",
+            "dyldSharedCacheImport": "user-supplied arm64e",
+            "launchdImport": "user-supplied arm64 MH_EXECUTE",
+            "launchdStableEventLoop": false,
+            "qemu": false,
+            "virtualizationFramework": false,
+            "companionPCRequired": false
+          }
+          EOF
+          cp "$RUNNER_TEMP/Nyxian/LICENSE" "$APP/Nyxian-LICENSE.txt" 2>/dev/null || true
+          cp "$RUNNER_TEMP/vphone-cli/LICENSE" "$APP/vphone-cli-LICENSE.txt"
+
+          rm -rf "$GITHUB_WORKSPACE/Payload"
+          mkdir -p "$GITHUB_WORKSPACE/Payload"
+          cp -R "$APP" "$GITHUB_WORKSPACE/Payload/NyxPhone.app"
+          test -s "$GITHUB_WORKSPACE/Payload/NyxPhone.app/NyxPhone"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$GITHUB_WORKSPACE/Payload/NyxPhone.app/Info.plist")" = NyxPhone
+          file "$GITHUB_WORKSPACE/Payload/NyxPhone.app/NyxPhone" | grep -qi 'Mach-O 64-bit executable arm64'
+          /usr/bin/plutil -p "$GITHUB_WORKSPACE/Payload/NyxPhone.app/Info.plist" | grep -q 'iphoneos'
+          test -s "$GITHUB_WORKSPACE/Payload/NyxPhone.app/NyxPhoneGuest/Nyxian.bin"
+          test -s "$GITHUB_WORKSPACE/Payload/NyxPhone.app/NyxPhoneGuest/NyxValidation.ipa"
+          cd "$GITHUB_WORKSPACE"
+          /usr/bin/zip -qry NyxPhone-unsigned.ipa Payload
+          test -s NyxPhone-unsigned.ipa
+          unzip -t NyxPhone-unsigned.ipa >/dev/null
+          shasum -a 256 NyxPhone-unsigned.ipa | tee NyxPhone-unsigned.sha256
+          ls -lh NyxPhone-unsigned.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NyxPhone-unsigned-real-device
+          path: |
+            NyxPhone-unsigned.ipa
+            NyxPhone-unsigned.sha256
+          if-no-files-found: error

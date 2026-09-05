@@ -84,7 +84,7 @@ final class HomeLayoutStore {
     private let widgetsKey = "home.layout.widgets"
     private let widgetMigrationKey = "home.layout.widgets.migratedToGrid"
     private let builtinSetVersionKey = "home.layout.builtinSetVersion"
-    private static let builtinSetVersion = 1
+    private static let builtinSetVersion = 2
 
     /// Built-ins already placed once. A built-in missing from this list is new
     /// to the install and gets a slot; one that is in it was deliberately

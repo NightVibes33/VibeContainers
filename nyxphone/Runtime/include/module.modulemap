@@ -1,0 +1,4 @@
+module NyxRuntimeCore {
+    header "NyxRuntime.h"
+    export *
+}

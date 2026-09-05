@@ -16,7 +16,8 @@ Apple firmware is never stored in this repository. Future firmware preparation a
 
 ## Nyxian TrollStore workspace
 
-NyxPhone includes a TrollStore-style workspace that is private to the host app.
+NyxPhone includes a distinct preinstalled TrollStore application surface that
+is private to the host app.
 It uses VibeContainers' real IPA extractor, per-app containers, Mach-O
 preparation, entitlement mediation, JIT/JIT-less signing, and launch lifecycle.
 It can import, persist, launch, remove, and export supported decrypted arm64

@@ -696,6 +696,8 @@ jobs:
           grep -Fq 'case install(URL)' iOSSim/Model/TrollStoreCompatibilityBridge.swift
           grep -Fq 'case uninstall(String)' iOSSim/Model/TrollStoreCompatibilityBridge.swift
           grep -Fq 'case open(String)' iOSSim/Model/TrollStoreCompatibilityBridge.swift
+          ! grep -Fq 'PackagesView' iOSSim/Apps/TrollStoreApp.swift
+          grep -Fq 'NyxianTrollStoreWorkspace()' iOSSim/Apps/TrollStoreApp.swift
           grep -Fq 'trollStoreBridge.execute(.install(url))' iOSSim/Apps/NyxianTrollStoreWorkspace.swift
           grep -Fq 'trollStoreBridge.execute(.open(app.bundleIdentifier))' iOSSim/Apps/NyxianTrollStoreWorkspace.swift
           grep -Fq 'trollStoreBridge.execute(.uninstall(app.bundleIdentifier))' iOSSim/Apps/NyxianTrollStoreWorkspace.swift

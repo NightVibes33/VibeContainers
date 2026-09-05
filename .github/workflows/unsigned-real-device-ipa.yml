@@ -80,6 +80,7 @@ jobs:
           grep -Fq 'allowedContentTypes: [.item]' iOSSim/Apps/PackagesView.swift
           grep -Fq 'ext == "ipa" || ext == "tipa"' iOSSim/Apps/PackagesView.swift
           grep -Fq 'case install(URL)' iOSSim/Model/TrollStoreCompatibilityBridge.swift
+          ! grep -Fq 'PackagesView' iOSSim/Apps/TrollStoreApp.swift
           grep -Fq 'await installer.installIPA(at: url)' iOSSim/Apps/PackagesView.swift
 
           # LiveContainer owns guest lifecycle only. It must not draw/classify a

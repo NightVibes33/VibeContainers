@@ -1,14 +1,12 @@
 import SwiftUI
 
-/// Preinstalled app-management surface for the private NyxPhone environment.
-/// It reuses the existing VibeContainers package, container, signing, tweak,
-/// and guest-launch implementation instead of maintaining a conflicting copy.
+/// The preinstalled TrollStore application entry point for NyxPhone.
+///
+/// This is a distinct app screen, not a shortcut into PackagesView. Its
+/// install/list/launch/remove actions live in NyxianTrollStoreWorkspace and
+/// cross the TrollStoreCompatibilityBridge command boundary.
 struct TrollStoreApp: View {
     var body: some View {
-        PackagesView(
-            onBack: {},
-            rootTitle: "TrollStore",
-            rootBackTitle: "Home"
-        )
+        NyxianTrollStoreWorkspace()
     }
 }

@@ -107,7 +107,7 @@ For a public unsigned artifact, omit all signing credentials:
 ./scripts/build_ipa.sh \
   --unsigned \
   --configuration Release \
-  --output build/VibeContainers-unsigned.ipa
+  --output build/ViPhone-unsigned.ipa
 ```
 
 An unsigned IPA cannot be installed as-is. Sign it with your own identity and

@@ -147,7 +147,7 @@ jobs:
             --unsigned \
             --configuration Release \
             --derived-data "$RUNNER_TEMP/VibeContainersDerivedData" \
-            --output "$RUNNER_TEMP/VibeContainers-unsigned-real-device.ipa" \
+            --output "$RUNNER_TEMP/ViPhone-unsigned-real-device.ipa" \
             2>&1 | tee "$RUNNER_TEMP/vibecontainers-build.log"
           status=${PIPESTATUS[0]}
           grep -E '(^|[[:space:]])(error:|fatal error:)|BUILD FAILED|Command .* failed|The following build commands failed' \
@@ -169,7 +169,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          IPA="$RUNNER_TEMP/VibeContainers-unsigned-real-device.ipa"
+          IPA="$RUNNER_TEMP/ViPhone-unsigned-real-device.ipa"
           CHECK="$RUNNER_TEMP/VibeContainersIPAValidation"
           rm -rf "$CHECK"
           mkdir -p "$CHECK"
@@ -231,14 +231,14 @@ jobs:
             exit 1
           fi
 
-          shasum -a 256 "$IPA" | tee "$RUNNER_TEMP/VibeContainers-unsigned-real-device.ipa.sha256"
+          shasum -a 256 "$IPA" | tee "$RUNNER_TEMP/ViPhone-unsigned-real-device.ipa.sha256"
 
       - name: Upload unsigned real-device IPA
         uses: actions/upload-artifact@v4
         with:
-          name: VibeContainers-unsigned-real-device-ipa
+          name: ViPhone-unsigned-real-device-ipa
           path: |
-            ${{ runner.temp }}/VibeContainers-unsigned-real-device.ipa
-            ${{ runner.temp }}/VibeContainers-unsigned-real-device.ipa.sha256
+            ${{ runner.temp }}/ViPhone-unsigned-real-device.ipa
+            ${{ runner.temp }}/ViPhone-unsigned-real-device.ipa.sha256
           if-no-files-found: error
           retention-days: 30
